@@ -1,0 +1,23 @@
+{
+  "name": "racing-results-updater",
+  "version": "1.0.0",
+  "description": "Automated system to update betting results from The Racing API",
+  "main": "bet-results-updater.js",
+  "scripts": {
+    "start": "node bet-results-updater.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "betting",
+    "racing",
+    "supabase",
+    "automation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.4",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1"
+  }
+}
