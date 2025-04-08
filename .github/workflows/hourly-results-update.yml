@@ -1,0 +1,31 @@
+name: Hourly Racing Results Update
+
+on:
+  schedule:
+    # Run hourly from 1pm to 11pm UTC
+    - cron: '0 13,14,15,16,17,18,19,20,21,22,23 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  update-results:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Run results updater
+        run: node bet-results-updater.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RACING_API_USERNAME: ${{ secrets.RACING_API_USERNAME }}
+          RACING_API_PASSWORD: ${{ secrets.RACING_API_PASSWORD }}
