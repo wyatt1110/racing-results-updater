@@ -1,243 +1,322 @@
-// bet-results-updater.js
 require('dotenv').config();
-const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
+const axios = require('axios');
 
-// API credentials
-const RACING_API_USERNAME = process.env.RACING_API_USERNAME || 'KQ9W7rQeAHWMUgxH93ie3yEc';
-const RACING_API_PASSWORD = process.env.RACING_API_PASSWORD || 'T5BoPivL3Q2h6RhCdLv4EwZu';
-const API_BASE_URL = 'https://api.theracingapi.com/v1';
-
-// Supabase connection
+// Configuration
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+const racingApiKey = process.env.RACING_API_KEY;
+const racingApiBase = 'https://api.theracingapi.com/v1';
 
+// Initialize Supabase client
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  }
+});
+
+// Helper functions
+const standardizeDate = (dateString) => {
+  const date = new Date(dateString);
+  return date.toISOString().split('T')[0];
+};
+
+const cleanHorseName = (name) => {
+  return name.toLowerCase().trim();
+};
+
+// Main function to update bet results
 async function updateBetResults() {
+  console.log('Starting bet results update process...');
+  
   try {
-    console.log('Starting bet results update process...');
-    const today = new Date().toISOString().split('T')[0];
-    
-    // Fetch today's race results from the API
-    console.log(`Fetching race results for ${today}...`);
-    const raceResults = await fetchRaceResults(today);
-    
-    if (!raceResults || !raceResults.results || raceResults.results.length === 0) {
-      console.log('No race results found for today.');
-      return;
-    }
-    
-    console.log(`Found ${raceResults.results.length} races with results.`);
-    
-    // Get pending bets from Supabase
-    const { data: pendingBets, error } = await supabase
-      .from('racing_bets')
+    // Fetch unprocessed bets from Supabase
+    const { data: pendingBets, error: betsError } = await supabase
+      .from('bets')
       .select('*')
-      .eq('status', 'pending');
+      .is('result', null)
+      .eq('settled', true);
     
-    if (error) {
-      throw new Error(`Error fetching pending bets: ${error.message}`);
+    if (betsError) {
+      throw new Error(`Error fetching pending bets: ${betsError.message}`);
     }
     
-    if (!pendingBets || pendingBets.length === 0) {
-      console.log('No pending bets found to update.');
-      return;
-    }
-    
-    console.log(`Found ${pendingBets.length} pending bets to process.`);
+    console.log(`Found ${pendingBets.length} pending bets to process`);
     
     // Process each pending bet
+    let updatedCount = 0;
+    
     for (const bet of pendingBets) {
-      await processBet(bet, raceResults.results);
+      try {
+        console.log(`Processing bet ID: ${bet.id} for horse: ${bet.selection}`);
+        
+        // Fetch race results for the bet's date and track
+        const results = await fetchRaceResults(bet.date, bet.track);
+        
+        if (!results || !results.length) {
+          console.log(`No results found for ${bet.track} on ${bet.date}`);
+          continue;
+        }
+        
+        // Find the horse in the results
+        const horseResult = findHorseInResults(results, bet.selection);
+        
+        if (!horseResult) {
+          console.log(`Horse ${bet.selection} not found in results for ${bet.track} on ${bet.date}`);
+          continue;
+        }
+        
+        // Determine bet result (win, place, loss)
+        const betResult = determineBetResult(horseResult, bet.bet_type);
+        
+        // Calculate bet returns based on result
+        const returns = calculateReturns(bet, betResult, horseResult);
+        
+        // Update the bet in Supabase
+        const { error: updateError } = await supabase
+          .from('bets')
+          .update({
+            result: betResult,
+            returns: returns,
+            bsp: horseResult.bsp || null,
+            clv: calculateCLV(bet, horseResult),
+            clv_stake: calculateCLVStake(bet, horseResult),
+            finishing_position: horseResult.position || null,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', bet.id);
+        
+        if (updateError) {
+          throw new Error(`Error updating bet ID ${bet.id}: ${updateError.message}`);
+        }
+        
+        console.log(`Successfully updated bet ID: ${bet.id}, Result: ${betResult}, Returns: ${returns}`);
+        updatedCount++;
+        
+      } catch (betError) {
+        console.error(`Error processing bet ID ${bet.id}:`, betError);
+      }
     }
     
-    console.log('Bet update process completed.');
+    console.log(`Successfully updated ${updatedCount} out of ${pendingBets.length} pending bets`);
+    return { success: true, updated: updatedCount, total: pendingBets.length };
+    
   } catch (error) {
-    console.error('Error updating bet results:', error);
+    console.error('Error in updateBetResults:', error);
+    return { success: false, error: error.message };
   }
 }
 
-async function fetchRaceResults(date) {
+// Fetch race results from Racing API
+async function fetchRaceResults(date, track) {
   try {
-    console.log(`Making API request to fetch results for date: ${date}`);
+    console.log(`Fetching results for ${track} on ${date}`);
     
-    const response = await axios({
-      method: 'get',
-      url: `${API_BASE_URL}/results`,
-      params: {
-        start_date: date,
-        end_date: date
-      },
-      auth: {
-        username: RACING_API_USERNAME,
-        password: RACING_API_PASSWORD
-      },
-      timeout: 15000
+    // Format date for API request
+    const formattedDate = standardizeDate(date);
+    
+    // Get cards for the date
+    const cardsResponse = await axios.get(`${racingApiBase}/cards`, {
+      headers: { 'X-Api-Key': racingApiKey },
+      params: { date: formattedDate }
     });
     
-    console.log(`Successfully retrieved results API data with status: ${response.status}`);
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching race results:', error.message);
-    if (error.response) {
-      console.error('API Response Status:', error.response.status);
-      console.error('API Response Data:', error.response.data);
+    if (!cardsResponse.data || !cardsResponse.data.data) {
+      console.log(`No race cards found for ${formattedDate}`);
+      return null;
     }
-    throw error;
-  }
-}
-
-async function processBet(bet, races) {
-  console.log(`Processing bet ID ${bet.id} for horse "${bet.horse_name}" at ${bet.track_name} on race date ${bet.race_date}`);
-  
-  // Find matching race and horse
-  const matchResult = findHorseInRaces(bet, races);
-  
-  if (!matchResult) {
-    console.log(`No match found for horse "${bet.horse_name}" at ${bet.track_name}`);
-    return;
-  }
-  
-  const { race, runner } = matchResult;
-  console.log(`Match found! Horse "${runner.horse}" finished in position ${runner.position} in race: ${race.race_name}`);
-  
-  // Calculate new status and returns
-  const updateData = calculateBetOutcome(bet, race, runner);
-  
-  // Update the bet in Supabase
-  const { error } = await supabase
-    .from('racing_bets')
-    .update(updateData)
-    .eq('id', bet.id);
-  
-  if (error) {
-    console.error(`Error updating bet ID ${bet.id}:`, error);
-    return;
-  }
-  
-  console.log(`Successfully updated bet ID ${bet.id} to status: ${updateData.status}, fin_pos: ${updateData.fin_pos}, returns: ${updateData.returns}`);
-}
-
-function findHorseInRaces(bet, races) {
-  // First try to match race by track name
-  const potentialRaces = races.filter(race => {
-    return race.course.toLowerCase().includes(bet.track_name.toLowerCase()) ||
-           bet.track_name.toLowerCase().includes(race.course.toLowerCase());
-  });
-  
-  if (potentialRaces.length === 0) {
-    console.log(`No races found matching track name: ${bet.track_name}`);
+    
+    // Find the specific track
+    const trackCard = cardsResponse.data.data.find(card => 
+      card.meeting && card.meeting.name && 
+      card.meeting.name.toLowerCase() === track.toLowerCase()
+    );
+    
+    if (!trackCard) {
+      console.log(`No card found for ${track} on ${formattedDate}`);
+      return null;
+    }
+    
+    // Get detailed race results
+    const races = [];
+    
+    for (const race of trackCard.races) {
+      try {
+        const raceResponse = await axios.get(`${racingApiBase}/race/${race.id}/result`, {
+          headers: { 'X-Api-Key': racingApiKey }
+        });
+        
+        if (raceResponse.data && raceResponse.data.data) {
+          races.push({
+            race_id: race.id,
+            race_name: race.name,
+            time: race.time,
+            results: raceResponse.data.data.runners.map(runner => ({
+              horse_name: runner.name,
+              position: runner.position,
+              bsp: runner.bsp || null,
+              sp: runner.sp || null
+            }))
+          });
+        }
+      } catch (raceError) {
+        console.error(`Error fetching results for race ${race.id}:`, raceError.message);
+      }
+    }
+    
+    return races;
+  } catch (error) {
+    console.error(`Error fetching race results:`, error.message);
     return null;
   }
+}
+
+// Find a horse in race results
+function findHorseInResults(races, horseName) {
+  console.log(`Looking for horse: ${horseName} in ${races.length} races`);
   
-  console.log(`Found ${potentialRaces.length} potential races at ${bet.track_name}`);
+  const cleanedHorseName = cleanHorseName(horseName);
   
-  // Now look for the horse within the matching races
-  for (const race of potentialRaces) {
-    const cleanBetHorseName = cleanHorseName(bet.horse_name);
-    
-    // Try exact match first (case-insensitive)
-    for (const runner of race.runners) {
-      const cleanRunnerHorseName = cleanHorseName(runner.horse);
+  for (const race of races) {
+    for (const horse of race.results) {
+      const cleanedResultHorse = cleanHorseName(horse.horse_name);
       
-      if (cleanRunnerHorseName === cleanBetHorseName) {
-        console.log(`Exact match found for "${bet.horse_name}" as "${runner.horse}"`);
-        return { race, runner };
+      // Check for exact match first
+      if (cleanedResultHorse === cleanedHorseName) {
+        console.log(`Found exact match for ${horseName} at position ${horse.position}`);
+        return {
+          ...horse,
+          race_id: race.race_id,
+          race_name: race.race_name
+        };
       }
-    }
-    
-    // If no exact match, try substring matching
-    for (const runner of race.runners) {
-      const cleanRunnerHorseName = cleanHorseName(runner.horse);
       
-      if (cleanRunnerHorseName.includes(cleanBetHorseName) || 
-          cleanBetHorseName.includes(cleanRunnerHorseName)) {
-        console.log(`Partial match found for "${bet.horse_name}" as "${runner.horse}"`);
-        return { race, runner };
+      // Check if result horse name contains the bet horse name
+      if (cleanedResultHorse.includes(cleanedHorseName) || 
+          cleanedHorseName.includes(cleanedResultHorse)) {
+        console.log(`Found partial match for ${horseName} -> ${horse.horse_name} at position ${horse.position}`);
+        return {
+          ...horse,
+          race_id: race.race_id,
+          race_name: race.race_name
+        };
       }
     }
   }
   
-  console.log(`No matching horse found for "${bet.horse_name}" in any of the races`);
+  console.log(`No match found for horse: ${horseName}`);
   return null;
 }
 
-function cleanHorseName(name) {
-  if (!name) return '';
+// Determine bet result (win, place, loss)
+function determineBetResult(horseResult, betType) {
+  if (!horseResult || !horseResult.position) {
+    return null;
+  }
   
-  return name.toLowerCase()
-    .replace(/\([^)]*\)/g, '') // Remove anything in parentheses (like country codes)
-    .replace(/[^\w\s]/g, '') // Remove special characters
-    .replace(/\s+/g, ' ') // Normalize whitespace
-    .trim();
-}
-
-function calculateBetOutcome(bet, race, runner) {
-  const position = parseInt(runner.position);
-  const fieldSize = race.runners.length;
-  const isEachWay = bet.e_w === true;
-  const updateData = {
-    fin_pos: position,
-    ovr_btn: parseFloat(runner.ovr_btn) || 0,
-    sp_industry: parseFloat(runner.sp_dec) || 0
-  };
+  const position = parseInt(horseResult.position, 10);
   
-  // Calculate bet status
-  if (position === 1) {
-    updateData.status = 'won';
-  } else if (!isEachWay) {
-    updateData.status = 'lost';
-  } else {
-    // Check if it's a place - depends on field size
-    if ((fieldSize <= 7 && position <= 2) || (fieldSize >= 8 && position <= 3)) {
-      updateData.status = 'placed';
+  if (isNaN(position)) {
+    return 'void'; // Non-runner or void race
+  }
+  
+  if (betType === 'win') {
+    return position === 1 ? 'win' : 'loss';
+  } else if (betType === 'place') {
+    // Typically places are 1-2-3, but can be adjusted based on field size
+    return position <= 3 ? 'place' : 'loss';
+  } else if (betType === 'each-way') {
+    if (position === 1) {
+      return 'win-place';
+    } else if (position <= 3) {
+      return 'place';
     } else {
-      updateData.status = 'lost';
+      return 'loss';
     }
   }
   
-  // Calculate returns and profit/loss
-  const odds = parseFloat(bet.odds);
-  const stake = parseFloat(bet.stake);
-  
-  if (updateData.status === 'won') {
-    if (isEachWay) {
-      // Win part + place part
-      const winHalf = stake / 2 * (odds + 1);
-      const placeOdds = fieldSize <= 7 ? (odds / 4) + 1 : (odds / 5) + 1;
-      const placeHalf = stake / 2 * placeOdds;
-      updateData.returns = winHalf + placeHalf;
-    } else {
-      updateData.returns = stake * (odds + 1);
-    }
-  } else if (updateData.status === 'placed') {
-    // Only place part pays
-    const placeOdds = fieldSize <= 7 ? (odds / 4) + 1 : (odds / 5) + 1;
-    updateData.returns = stake / 2 * placeOdds;
-  } else {
-    updateData.returns = 0;
-  }
-  
-  updateData.profit_loss = updateData.returns - stake;
-  
-  console.log(`Calculated outcome for bet ID ${bet.id}:`, {
-    position,
-    fieldSize,
-    isEachWay,
-    status: updateData.status,
-    returns: updateData.returns,
-    profit_loss: updateData.profit_loss
-  });
-  
-  return updateData;
+  return null;
 }
 
-// Run the script if executed directly
+// Calculate returns based on bet result
+function calculateReturns(bet, result, horseResult) {
+  if (!result || result === 'loss' || result === 'void') {
+    return 0;
+  }
+  
+  // For win bets
+  if (bet.bet_type === 'win' && result === 'win') {
+    return bet.stake * bet.odds;
+  }
+  
+  // For place bets
+  if (bet.bet_type === 'place' && result === 'place') {
+    // Typically place odds are 1/4 or 1/5 of win odds for 3 places
+    const placeOdds = (bet.odds - 1) / 4 + 1;
+    return bet.stake * placeOdds;
+  }
+  
+  // For each-way bets
+  if (bet.bet_type === 'each-way') {
+    let returns = 0;
+    const placeOdds = (bet.odds - 1) / 4 + 1;
+    
+    if (result === 'win-place') {
+      // Win part
+      returns += (bet.stake / 2) * bet.odds;
+      // Place part
+      returns += (bet.stake / 2) * placeOdds;
+    } else if (result === 'place') {
+      // Only place part wins
+      returns += (bet.stake / 2) * placeOdds;
+    }
+    
+    return returns;
+  }
+  
+  return 0;
+}
+
+// Calculate CLV (Closing Line Value)
+function calculateCLV(bet, horseResult) {
+  if (!horseResult.bsp || horseResult.bsp <= 0) {
+    return null;
+  }
+  
+  const bspOdds = parseFloat(horseResult.bsp);
+  const betOdds = parseFloat(bet.odds);
+  
+  if (isNaN(bspOdds) || isNaN(betOdds)) {
+    return null;
+  }
+  
+  // CLV formula: (bet_odds / bsp_odds - 1) * 100
+  const clv = (betOdds / bspOdds - 1) * 100;
+  return Math.round(clv * 100) / 100; // Round to 2 decimal places
+}
+
+// Calculate CLV Stake (value captured by stake)
+function calculateCLVStake(bet, horseResult) {
+  const clv = calculateCLV(bet, horseResult);
+  
+  if (clv === null) {
+    return null;
+  }
+  
+  // CLV Stake = CLV * Stake / 100
+  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
+}
+
+// Run the main function if invoked directly
 if (require.main === module) {
   updateBetResults()
-    .then(() => console.log('Script execution completed successfully'))
-    .catch(err => {
-      console.error('Script execution failed:', err);
+    .then(result => {
+      console.log('Script execution completed:', result);
+      process.exit(result.success ? 0 : 1);
+    })
+    .catch(error => {
+      console.error('Unhandled error in script execution:', error);
       process.exit(1);
     });
 }
