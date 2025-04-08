@@ -5,7 +5,8 @@ const axios = require('axios');
 // Configuration
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
-const racingApiKey = process.env.RACING_API_KEY;
+const racingApiUsername = process.env.RACING_API_USERNAME;
+const racingApiPassword = process.env.RACING_API_PASSWORD;
 const racingApiBase = 'https://api.theracingapi.com/v1';
 
 // Initialize Supabase client
@@ -13,6 +14,15 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
+  }
+});
+
+// Create axios instance with authentication
+const racingApi = axios.create({
+  baseURL: racingApiBase,
+  auth: {
+    username: racingApiUsername,
+    password: racingApiPassword
   }
 });
 
@@ -116,10 +126,12 @@ async function fetchRaceResults(date, track) {
     // Format date for API request
     const formattedDate = standardizeDate(date);
     
-    // Get cards for the date
-    const cardsResponse = await axios.get(`${racingApiBase}/cards`, {
-      headers: { 'X-Api-Key': racingApiKey },
-      params: { date: formattedDate }
+    // Get racecards for the date range
+    const cardsResponse = await racingApi.get('/racecards', {
+      params: { 
+        start_date: formattedDate,
+        end_date: formattedDate
+      }
     });
     
     if (!cardsResponse.data || !cardsResponse.data.data) {
@@ -143,9 +155,7 @@ async function fetchRaceResults(date, track) {
     
     for (const race of trackCard.races) {
       try {
-        const raceResponse = await axios.get(`${racingApiBase}/race/${race.id}/result`, {
-          headers: { 'X-Api-Key': racingApiKey }
-        });
+        const raceResponse = await racingApi.get(`/race/${race.id}/result`);
         
         if (raceResponse.data && raceResponse.data.data) {
           races.push({
