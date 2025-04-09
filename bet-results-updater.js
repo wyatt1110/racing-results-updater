@@ -97,8 +97,20 @@ async function updateBetResults() {
           console.log(`No course ID found for ${track}, will use track name only`);
         }
         
-        // Fetch results for this track and date
-        const horses = await fetchTrackResults(track, courseId, date);
+        // Fetch results for this track and date using results endpoint
+        let horses = await fetchTrackResults(track, courseId, date, '/results');
+        
+        // If no horses found, try the cards endpoint
+        if (horses.length === 0) {
+          console.log(`No horses found from results endpoint, trying cards endpoint...`);
+          horses = await fetchTrackResults(track, courseId, date, '/cards');
+        }
+        
+        // If still no horses, try the results/today endpoint for today's races
+        if (horses.length === 0 && date === new Date().toISOString().split('T')[0]) {
+          console.log(`No horses found from cards endpoint, trying results/today endpoint...`);
+          horses = await fetchTrackResults(track, courseId, date, '/results/today');
+        }
         
         if (horses.length === 0) {
           console.log(`No horses found for ${track} on ${date}, skipping ${bets.length} bets`);
@@ -211,65 +223,71 @@ function groupBetsByTrackAndDate(bets) {
 }
 
 // Fetch results for a specific track and date
-async function fetchTrackResults(trackName, courseId, date) {
-  console.log(`Fetching results for track: ${trackName}, date: ${date}`);
+async function fetchTrackResults(trackName, courseId, date, endpoint = '/results') {
+  console.log(`Fetching results for track: ${trackName}, date: ${date}, endpoint: ${endpoint}`);
   
   try {
-    // Build the API request options
-    let params = { 
-      start_date: date,
-      end_date: date
-    };
+    // Create filename-safe version of track name
+    const safeTrackName = trackName.replace(/\s+/g, '_');
     
-    // Add course ID if available
-    if (courseId) {
-      params.course = [courseId];
+    // Different API calls based on endpoint
+    let response;
+    if (endpoint === '/results') {
+      const options = {
+        start_date: date,
+        end_date: date
+      };
+      
+      // Only add course parameter if we have a course ID
+      if (courseId) {
+        options.course = courseId; // API expects just the ID string, not an array
+      } else {
+        // Without course ID, try region for UK races
+        options.region = 'gb';
+      }
+      
+      console.log(`API Request: ${endpoint} with params:`, options);
+      response = await racingApi.get(endpoint, { params: options });
+      
+    } else if (endpoint === '/cards') {
+      // Cards endpoint takes date as string parameter
+      console.log(`API Request: ${endpoint}?date=${date}`);
+      response = await racingApi.get(endpoint, { 
+        params: { date }
+      });
+      
+    } else if (endpoint === '/results/today') {
+      // Today's results endpoint takes no parameters
+      console.log(`API Request: ${endpoint}`);
+      response = await racingApi.get(endpoint);
     }
     
-    const requestUrl = `/results?${new URLSearchParams(params).toString()}`;
-    console.log(`API Request: ${requestUrl}`);
-    
-    // Make the API call
-    const response = await racingApi.get('/results', { params });
-    
     // Save raw response for debugging
-    const outputFile = `${trackName.replace(/\s+/g, '_')}_${date}_response.json`;
+    const outputFile = `${safeTrackName}_${date}_${endpoint.replace(/\//g, '_')}.json`;
     fs.writeFileSync(outputFile, JSON.stringify(response.data, null, 2));
     console.log(`Saved raw API response to ${outputFile}`);
     
     // Extract horse data
     const horses = extractHorsesFromResponse(response.data, trackName);
     
-    if (horses.length === 0) {
-      console.log(`No horses found in response, trying alternative endpoints...`);
+    if (horses.length > 0) {
+      console.log(`Extracted ${horses.length} horses for ${trackName}`);
       
-      // Try cards endpoint
-      try {
-        const cardsResponse = await racingApi.get('/cards', { 
-          params: { date }
-        });
-        
-        const cardsOutputFile = `${trackName.replace(/\s+/g, '_')}_${date}_cards_response.json`;
-        fs.writeFileSync(cardsOutputFile, JSON.stringify(cardsResponse.data, null, 2));
-        
-        const cardsHorses = extractHorsesFromResponse(cardsResponse.data, trackName);
-        if (cardsHorses.length > 0) {
-          console.log(`Found ${cardsHorses.length} horses from cards endpoint`);
-          return cardsHorses;
-        }
-      } catch (err) {
-        console.log(`Cards endpoint failed: ${err.message}`);
-      }
+      // Save extracted horses to file for debugging
+      const horsesFile = `${safeTrackName}_${date}_horses.json`;
+      fs.writeFileSync(horsesFile, JSON.stringify(horses, null, 2));
+    } else {
+      console.log(`No horses found for ${trackName} in the ${endpoint} response`);
     }
     
     return horses;
     
   } catch (error) {
-    console.error(`Error fetching results for ${trackName} on ${date}:`, error.message);
+    console.error(`Error fetching ${endpoint} for ${trackName} on ${date}:`, error.message);
     if (error.response) {
       console.error(`API Status: ${error.response.status}`);
       if (error.response.data) {
-        console.error(`API Response: ${JSON.stringify(error.response.data).substring(0, 200)}...`);
+        console.error(`API Response: ${JSON.stringify(error.response.data || {}).substring(0, 200)}...`);
       }
     }
     return [];
@@ -345,9 +363,9 @@ function extractHorsesFromResponse(apiData, targetTrack) {
   if (horses.length > 0) {
     console.log(`Found ${horses.length} horses for ${targetTrack}`);
     
-    // Save horses to file for debugging
-    const outputFile = `${targetTrack.replace(/\s+/g, '_')}_horses.json`;
-    fs.writeFileSync(outputFile, JSON.stringify(horses, null, 2));
+    // Print a few sample horse names
+    console.log('Sample horses:');
+    horses.slice(0, 5).forEach(h => console.log(`- ${h.horse_name}`));
   } else {
     console.log(`No horses found for ${targetTrack}`);
   }
