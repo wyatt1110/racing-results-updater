@@ -1,0 +1,24 @@
+{
+  "course_list": [
+    {
+      "id": "crs_19734",
+      "name": "Catterick"
+    },
+    {
+      "id": "crs_38742",
+      "name": "Nottingham"
+    },
+    {
+      "id": "crs_32789",
+      "name": "Leopardstown"
+    },
+    {
+      "id": "crs_29348",
+      "name": "Kempton"
+    },
+    {
+      "id": "crs_23985",
+      "name": "Taunton"
+    }
+  ]
+}
