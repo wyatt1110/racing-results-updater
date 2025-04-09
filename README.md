@@ -1,80 +1,35 @@
 # Racing Results Updater
 
-Automated system to update betting results from The Racing API into a Supabase database.
+Automatic system for updating racing bet results using The Racing API.
 
-## Features
+## How it Works
 
-- Fetches race results from The Racing API
-- Updates bet records in Supabase with results and returns
-- Calculates CLV (Closing Line Value) for each bet
-- Runs automatically on GitHub Actions hourly between 1pm and 11pm UTC
-- Handles win, place, and each-way bets
+This script performs the following:
 
-## Setup
+1. Fetches pending bets from Supabase
+2. Groups bets by track and date
+3. Makes separate API calls for each track/date combination
+4. Matches horses using multiple matching strategies
+5. Updates bet results in Supabase
 
-### Prerequisites
+## Key Features
 
-- Node.js 18 or later
-- Supabase account with a database containing a `bets` table
-- API key for The Racing API
-
-### Environment Variables
-
-Create a `.env` file in the project root (for local development) or set up GitHub Secrets (for GitHub Actions):
-
-```
-SUPABASE_URL=your_supabase_url
-SUPABASE_KEY=your_supabase_key
-RACING_API_KEY=your_racing_api_key
-```
-
-### Installation
-
-```bash
-git clone https://github.com/wyatt1110/racing-results-updater.git
-cd racing-results-updater
-npm install
-```
+- Track-specific API calls to reduce data volume
+- 15-second delay between API calls
+- Course ID lookup for precise filtering
+- Multiple matching strategies for horses
+- Detailed logging and debugging
 
 ## Usage
 
-### Run Locally
-
-```bash
+```
 node bet-results-updater.js
 ```
 
-### GitHub Actions
+## Alternative Scripts
 
-The workflow is set to run automatically every hour between 1pm and 11pm UTC.
+The repository also includes additional scripts for different approaches:
 
-You can also trigger it manually from the "Actions" tab in your GitHub repository.
-
-## Supabase Schema
-
-The script expects a `bets` table with the following schema:
-
-```sql
-CREATE TABLE bets (
-  id UUID PRIMARY KEY,
-  selection TEXT NOT NULL,
-  track TEXT NOT NULL,
-  date DATE NOT NULL,
-  stake NUMERIC NOT NULL,
-  odds NUMERIC NOT NULL,
-  bet_type TEXT NOT NULL,
-  settled BOOLEAN DEFAULT false,
-  result TEXT,
-  returns NUMERIC,
-  bsp NUMERIC,
-  clv NUMERIC,
-  clv_stake NUMERIC,
-  finishing_position TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP
-);
-```
-
-## License
-
-ISC
+- `track-specific-updater.js` - Alternative implementation with similar functionality
+- `alternative-api-approach.js` - Another approach using date-specific API calls
+- `inspect-api-structure.js` - Utility to analyze API response structure
