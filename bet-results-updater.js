@@ -77,11 +77,15 @@ async function updateBetResults() {
           continue;
         }
         
+        // Get number of runners in the race
+        const numRunners = horseResult.total_runners || 0;
+        console.log(`Race has ${numRunners} runners`);
+        
         // Determine bet result (win, place, loss)
-        const betResult = determineBetResult(horseResult, bet.bet_type);
+        const betResult = determineBetResult(horseResult, bet.bet_type, numRunners);
         
         // Calculate bet returns based on result
-        const returns = calculateReturns(bet, betResult, horseResult);
+        const returns = calculateReturns(bet, betResult, horseResult, numRunners);
         
         // Update the bet in Supabase
         const { error: updateError } = await supabase
@@ -158,15 +162,20 @@ async function fetchRaceResults(date, track) {
         const raceResponse = await racingApi.get(`/race/${race.id}/result`);
         
         if (raceResponse.data && raceResponse.data.data) {
+          // Get total number of runners
+          const totalRunners = raceResponse.data.data.runners ? raceResponse.data.data.runners.length : 0;
+          
           races.push({
             race_id: race.id,
             race_name: race.name,
             time: race.time,
+            total_runners: totalRunners,
             results: raceResponse.data.data.runners.map(runner => ({
               horse_name: runner.name,
               position: runner.position,
               bsp: runner.bsp || null,
-              sp: runner.sp || null
+              sp: runner.sp || null,
+              total_runners: totalRunners
             }))
           });
         }
@@ -198,7 +207,8 @@ function findHorseInResults(races, horseName) {
         return {
           ...horse,
           race_id: race.race_id,
-          race_name: race.race_name
+          race_name: race.race_name,
+          total_runners: race.total_runners
         };
       }
       
@@ -209,7 +219,8 @@ function findHorseInResults(races, horseName) {
         return {
           ...horse,
           race_id: race.race_id,
-          race_name: race.race_name
+          race_name: race.race_name,
+          total_runners: race.total_runners
         };
       }
     }
@@ -219,8 +230,8 @@ function findHorseInResults(races, horseName) {
   return null;
 }
 
-// Determine bet result (win, place, loss)
-function determineBetResult(horseResult, betType) {
+// Determine bet result (win, place, loss) based on number of runners
+function determineBetResult(horseResult, betType, numRunners) {
   if (!horseResult || !horseResult.position) {
     return null;
   }
@@ -231,15 +242,45 @@ function determineBetResult(horseResult, betType) {
     return 'void'; // Non-runner or void race
   }
   
+  // Win bet logic
   if (betType === 'win') {
     return position === 1 ? 'win' : 'loss';
-  } else if (betType === 'place') {
-    // Typically places are 1-2-3, but can be adjusted based on field size
-    return position <= 3 ? 'place' : 'loss';
-  } else if (betType === 'each-way') {
+  }
+  
+  // Place bet logic based on number of runners
+  if (betType === 'place') {
+    // Apply place rules based on number of runners
+    if (numRunners <= 7) {
+      return position <= 2 ? 'place' : 'loss';
+    } else if (numRunners <= 12) { 
+      return position <= 3 ? 'place' : 'loss';
+    } else if (numRunners <= 19) {
+      return position <= 4 ? 'place' : 'loss';
+    } else {
+      return position <= 5 ? 'place' : 'loss';
+    }
+  }
+  
+  // Each-way bet logic
+  if (betType === 'each-way') {
+    // Win part
     if (position === 1) {
-      return 'win-place';
-    } else if (position <= 3) {
+      // Check place part based on number of runners
+      if (numRunners <= 7) {
+        return 'win-place'; // Win and place (top 2)
+      } else if (numRunners <= 12) {
+        return 'win-place'; // Win and place (top 3)
+      } else if (numRunners <= 19) {
+        return 'win-place'; // Win and place (top 4)
+      } else {
+        return 'win-place'; // Win and place (top 5)
+      }
+    } 
+    // Place part only (no win)
+    else if ((numRunners <= 7 && position === 2) ||
+             (numRunners <= 12 && position <= 3) ||
+             (numRunners <= 19 && position <= 4) ||
+             (numRunners >= 20 && position <= 5)) {
       return 'place';
     } else {
       return 'loss';
@@ -249,8 +290,8 @@ function determineBetResult(horseResult, betType) {
   return null;
 }
 
-// Calculate returns based on bet result
-function calculateReturns(bet, result, horseResult) {
+// Calculate returns based on bet result and number of runners
+function calculateReturns(bet, result, horseResult, numRunners) {
   if (!result || result === 'loss' || result === 'void') {
     return 0;
   }
@@ -260,17 +301,46 @@ function calculateReturns(bet, result, horseResult) {
     return bet.stake * bet.odds;
   }
   
-  // For place bets
+  // For place bets - apply different place terms based on runner count
   if (bet.bet_type === 'place' && result === 'place') {
-    // Typically place odds are 1/4 or 1/5 of win odds for 3 places
-    const placeOdds = (bet.odds - 1) / 4 + 1;
+    let placeOdds;
+    
+    if (numRunners <= 7) {
+      // 1/4 odds for 2 places
+      placeOdds = (bet.odds - 1) / 4 + 1;
+    } else if (numRunners <= 12) {
+      // 1/5 odds for 3 places
+      placeOdds = (bet.odds - 1) / 5 + 1;
+    } else if (numRunners <= 19) {
+      // 1/5 odds for 4 places
+      placeOdds = (bet.odds - 1) / 5 + 1;
+    } else {
+      // 1/6 odds for 5 places
+      placeOdds = (bet.odds - 1) / 6 + 1;
+    }
+    
     return bet.stake * placeOdds;
   }
   
   // For each-way bets
   if (bet.bet_type === 'each-way') {
     let returns = 0;
-    const placeOdds = (bet.odds - 1) / 4 + 1;
+    let placeOdds;
+    
+    // Calculate place odds based on number of runners
+    if (numRunners <= 7) {
+      // 1/4 odds for 2 places
+      placeOdds = (bet.odds - 1) / 4 + 1;
+    } else if (numRunners <= 12) {
+      // 1/5 odds for 3 places
+      placeOdds = (bet.odds - 1) / 5 + 1;
+    } else if (numRunners <= 19) {
+      // 1/5 odds for 4 places
+      placeOdds = (bet.odds - 1) / 5 + 1;
+    } else {
+      // 1/6 odds for 5 places
+      placeOdds = (bet.odds - 1) / 6 + 1;
+    }
     
     if (result === 'win-place') {
       // Win part
