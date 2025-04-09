@@ -3,8 +3,8 @@ const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 
 // Configuration
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const racingApiUsername = process.env.RACING_API_USERNAME;
 const racingApiPassword = process.env.RACING_API_PASSWORD;
 const racingApiBase = 'https://api.theracingapi.com/v1';
@@ -41,11 +41,11 @@ async function updateBetResults() {
   console.log('Starting bet results update process...');
   
   try {
-    // Fetch unprocessed bets from Supabase
-    const { data: pendingBets, error: betsError } = await supabase
+    // Try with multiple status values to find pending bets
+    let { data: pendingBets, error: betsError } = await supabase
       .from('racing_bets')
       .select('*')
-      .eq('status', 'pending');
+      .or('status.eq.pending,status.eq.open,status.is.null');
     
     if (betsError) {
       throw new Error(`Error fetching pending bets: ${betsError.message}`);
@@ -110,8 +110,11 @@ async function processSingleBet(bet) {
   const numRunners = horseResult.total_runners || 0;
   console.log(`Race has ${numRunners} runners`);
   
+  // Determine if this is an each-way bet (check both field names)
+  const isEachWay = bet.each_way === true || bet.e_w === true;
+  
   // Determine bet result (win, place, loss)
-  const betType = bet.each_way ? 'each-way' : bet.bet_type;
+  const betType = isEachWay ? 'each-way' : bet.bet_type;
   const betResult = determineBetResult(horseResult, betType, numRunners);
   
   // Calculate bet returns based on result
@@ -209,6 +212,9 @@ async function processMultipleBet(bet) {
   
   // Format SP values for sp_industry field
   const spFormatted = horseResults.map(hr => hr.sp || '0').join(' / ');
+  
+  // Determine if this is an each-way bet (check both field names)
+  const isEachWay = bet.each_way === true || bet.e_w === true;
   
   // Determine bet result - for multiple bets, all selections must win
   let status = 'lost';
@@ -432,7 +438,7 @@ function determineBetResult(horseResult, betType, numRunners) {
       }
     } 
     // Place part only (no win)
-    else if ((numRunners <= 7 && position === 2) ||
+    else if ((numRunners <= 7 && position <= 2) ||
              (numRunners <= 12 && position <= 3) ||
              (numRunners <= 19 && position <= 4) ||
              (numRunners >= 20 && position <= 5)) {
@@ -450,6 +456,9 @@ function calculateReturns(bet, result, horseResult, numRunners) {
   if (!result || result === 'loss' || result === 'void') {
     return 0;
   }
+  
+  // Determine if this is an each-way bet (check both field names)
+  const isEachWay = bet.each_way === true || bet.e_w === true;
   
   // For win bets
   if (bet.bet_type === 'win' && result === 'win') {
@@ -478,7 +487,7 @@ function calculateReturns(bet, result, horseResult, numRunners) {
   }
   
   // For each-way bets
-  if (bet.each_way === true) {
+  if (isEachWay) {
     let returns = 0;
     let placeOdds;
     
