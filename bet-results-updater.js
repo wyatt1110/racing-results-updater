@@ -40,6 +40,7 @@ const standardizeDate = (dateString) => {
 };
 
 const cleanHorseName = (name) => {
+  if (!name) return '';
   return name.toLowerCase().trim();
 };
 
@@ -95,6 +96,14 @@ async function updateBetResults() {
     // Fetch today's race results once
     todaysRaceResults = await fetchTodaysRaceResults();
     
+    if (!todaysRaceResults || todaysRaceResults.length === 0) {
+      console.log('No race results found for today, nothing to update');
+      return { success: true, updated: 0, total: pendingBets.length };
+    }
+    
+    // Create a map for faster horse name lookups
+    const horseMap = createHorseNameMap(todaysRaceResults);
+    
     // Process each pending bet
     let updatedCount = 0;
     
@@ -102,20 +111,11 @@ async function updateBetResults() {
       try {
         console.log(`Processing bet ID: ${bet.id} for horse: ${bet.horse_name}`);
         
-        // Only process bets for today's date
-        const today = new Date().toISOString().split('T')[0];
-        const betDate = standardizeDate(bet.race_date);
-        
-        if (betDate !== today) {
-          console.log(`Skipping bet ID ${bet.id} - race date ${betDate} is not today (${today})`);
-          continue;
-        }
-        
         // Check if this is a multiple bet (contains '/' in horse_name)
-        if (bet.horse_name.includes('/')) {
-          await processMultipleBet(bet);
+        if (bet.horse_name && bet.horse_name.includes('/')) {
+          await processMultipleBet(bet, todaysRaceResults, horseMap);
         } else {
-          await processSingleBet(bet);
+          await processSingleBet(bet, todaysRaceResults, horseMap);
         }
         
         updatedCount++;
@@ -134,21 +134,113 @@ async function updateBetResults() {
   }
 }
 
-// Process a single horse bet
-async function processSingleBet(bet) {
-  // Get the results for this track from today's cache
-  const results = findTrackResults(bet.track_name);
+// Create a map of horse names for faster lookups
+function createHorseNameMap(raceResults) {
+  const map = new Map();
   
-  if (!results || !results.length) {
-    console.log(`No results found for ${bet.track_name} today`);
-    return;
+  for (const race of raceResults) {
+    const trackName = race.track_name.toLowerCase().trim();
+    
+    if (!map.has(trackName)) {
+      map.set(trackName, []);
+    }
+    
+    for (const horse of race.results) {
+      const horseName = horse.horse_name.toLowerCase().trim();
+      
+      // Store the horse info with the track
+      map.get(trackName).push({
+        horseName,
+        fullInfo: {
+          ...horse,
+          race_id: race.race_id,
+          race_name: race.race_name,
+          total_runners: race.total_runners
+        }
+      });
+    }
   }
   
-  // Find the horse in the results
-  const horseResult = findHorseInResults(results, bet.horse_name);
+  return map;
+}
+
+// Find a horse in the map
+function findHorseInMap(horseMap, horseName, trackName) {
+  if (!horseName || !trackName) return null;
+  
+  const cleanedHorseName = cleanHorseName(horseName);
+  const cleanedTrackName = cleanHorseName(trackName);
+  
+  console.log(`Looking for horse: ${cleanedHorseName} at track: ${cleanedTrackName}`);
+  
+  // First try exact track name match
+  if (horseMap.has(cleanedTrackName)) {
+    const trackHorses = horseMap.get(cleanedTrackName);
+    
+    // Try exact horse name match first
+    const exactMatch = trackHorses.find(h => h.horseName === cleanedHorseName);
+    if (exactMatch) {
+      console.log(`Found exact match for ${horseName} at position ${exactMatch.fullInfo.position}`);
+      return exactMatch.fullInfo;
+    }
+    
+    // Try partial matches
+    const partialMatch = trackHorses.find(h => 
+      h.horseName.includes(cleanedHorseName) || 
+      cleanedHorseName.includes(h.horseName)
+    );
+    
+    if (partialMatch) {
+      console.log(`Found partial match for ${horseName} -> ${partialMatch.fullInfo.horse_name} at position ${partialMatch.fullInfo.position}`);
+      return partialMatch.fullInfo;
+    }
+    
+    // Try prefix match (for horses with apostrophes, etc.)
+    const prefixMatch = trackHorses.find(h => 
+      h.horseName.startsWith(cleanedHorseName.substring(0, 5)) ||
+      cleanedHorseName.startsWith(h.horseName.substring(0, 5))
+    );
+    
+    if (prefixMatch) {
+      console.log(`Found prefix match for ${horseName} -> ${prefixMatch.fullInfo.horse_name} at position ${prefixMatch.fullInfo.position}`);
+      return prefixMatch.fullInfo;
+    }
+  }
+  
+  // If we couldn't find by exact track, try to find similar track names
+  for (const [mapTrack, horses] of horseMap.entries()) {
+    // Skip if we already tried this track exactly
+    if (mapTrack === cleanedTrackName) continue;
+    
+    // Check if track names are similar
+    if (mapTrack.includes(cleanedTrackName) || cleanedTrackName.includes(mapTrack)) {
+      // Try to find the horse in this similar track
+      const match = horses.find(h => 
+        h.horseName === cleanedHorseName ||
+        h.horseName.includes(cleanedHorseName) || 
+        cleanedHorseName.includes(h.horseName) ||
+        h.horseName.startsWith(cleanedHorseName.substring(0, 5)) ||
+        cleanedHorseName.startsWith(h.horseName.substring(0, 5))
+      );
+      
+      if (match) {
+        console.log(`Found match for ${horseName} at similar track ${mapTrack} at position ${match.fullInfo.position}`);
+        return match.fullInfo;
+      }
+    }
+  }
+  
+  console.log(`No match found for horse: ${horseName} at track: ${trackName}`);
+  return null;
+}
+
+// Process a single horse bet
+async function processSingleBet(bet, raceResults, horseMap) {
+  // Find the horse in the results using the map
+  const horseResult = findHorseInMap(horseMap, bet.horse_name, bet.track_name);
   
   if (!horseResult) {
-    console.log(`Horse ${bet.horse_name} not found in results for ${bet.track_name}`);
+    console.log(`No results found for ${bet.track_name} today`);
     return;
   }
   
@@ -169,13 +261,13 @@ async function processSingleBet(bet) {
   // Map betResult to status field value
   let status = 'pending';
   if (betResult === 'win' || betResult === 'win-place') {
-    status = 'won';
+    status = 'Won';
   } else if (betResult === 'place') {
-    status = 'placed';
+    status = 'Placed';
   } else if (betResult === 'loss') {
-    status = 'lost';
+    status = 'Lost';
   } else if (betResult === 'void') {
-    status = 'void';
+    status = 'Void';
   }
   
   // Calculate profit/loss
@@ -205,13 +297,13 @@ async function processSingleBet(bet) {
 }
 
 // Process a multiple bet (horses separated by '/')
-async function processMultipleBet(bet) {
+async function processMultipleBet(bet, raceResults, horseMap) {
   // Split selection by '/'
   const selections = bet.horse_name.split('/').map(s => s.trim());
   console.log(`Processing multiple bet with ${selections.length} selections: ${selections.join(', ')}`);
   
   // Split track names if multiple tracks
-  const trackNames = bet.track_name.split('/').map(t => t.trim());
+  const trackNames = bet.track_name ? bet.track_name.split('/').map(t => t.trim()) : [];
   
   // Find all horses in the results
   const horseResults = [];
@@ -221,17 +313,14 @@ async function processMultipleBet(bet) {
     // Get track name (use the corresponding track if available, otherwise use the first one)
     const trackName = trackNames[i] || trackNames[0];
     
-    // Get results for this track
-    const results = findTrackResults(trackName);
-    
-    if (!results || !results.length) {
-      console.log(`No results found for ${trackName} today`);
+    if (!trackName) {
+      console.log(`No track name found for selection ${selection}`);
       return;
     }
     
-    const horseResult = findHorseInResults(results, selection);
+    const horseResult = findHorseInMap(horseMap, selection, trackName);
     if (!horseResult) {
-      console.log(`Horse ${selection} not found in results for ${trackName}`);
+      console.log(`No results found for ${trackName} today`);
       return; // Exit if any horse is not found
     }
     horseResults.push(horseResult);
@@ -271,14 +360,14 @@ async function processMultipleBet(bet) {
   const isEachWay = bet.each_way === true || bet.e_w === true;
   
   // Determine bet result - for multiple bets, all selections must win
-  let status = 'lost';
+  let status = 'Lost';
   if (bet.bet_type === 'win' && allWon) {
-    status = 'won';
+    status = 'Won';
   }
   
   // Calculate returns
   let returns = 0;
-  if (status === 'won') {
+  if (status === 'Won') {
     returns = bet.stake * bet.odds;
   }
   
@@ -308,28 +397,52 @@ async function processMultipleBet(bet) {
   console.log(`Successfully updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}, Positions: ${positionsFormatted}`);
 }
 
-// Fetch today's race results using the simpler API call
+// Fetch today's race results directly from the Racing API
 async function fetchTodaysRaceResults() {
   try {
     console.log('Fetching today\'s race results...');
     
+    // Use the exact endpoint that worked with curl
     const response = await racingApi.get('/results/today');
     
-    if (!response.data || !response.data.data || !response.data.data.results) {
-      console.log('No race results found for today');
+    // Save the raw response for debugging
+    try {
+      const fs = require('fs');
+      fs.writeFileSync('results_raw_response.json', JSON.stringify(response.data, null, 2));
+      console.log('Saved raw API response to results_raw_response.json');
+    } catch (writeError) {
+      console.log('Could not save response to file:', writeError.message);
+    }
+    
+    // Check if we have valid data
+    if (!response.data || response.data.status !== 'success' || !response.data.data || !response.data.data.results) {
+      console.log('No race results found for today or invalid response structure');
+      console.log('Response status:', response.status);
+      console.log('Response data structure:', JSON.stringify(Object.keys(response.data || {})));
       return [];
     }
     
-    console.log(`Successfully retrieved results for ${response.data.data.results.length} races`);
+    const meetings = response.data.data.results;
+    console.log(`Successfully retrieved results for ${meetings.length} meetings`);
+    
+    // Save formatted results for debugging
+    try {
+      const fs = require('fs');
+      fs.writeFileSync('results_today.json', JSON.stringify(meetings, null, 2));
+      console.log('Saved formatted race results to results_today.json');
+    } catch (writeError) {
+      console.log('Could not save results to file:', writeError.message);
+    }
     
     // Process and format the results
     const formattedRaces = [];
     
-    for (const meeting of response.data.data.results) {
+    for (const meeting of meetings) {
       const track = meeting.meeting_name || meeting.course;
+      console.log(`Processing results for track: ${track}`);
       
       // Process each race at this track
-      for (const race of meeting.races) {
+      for (const race of meeting.races || []) {
         // Get runners
         const runners = race.runners || [];
         
@@ -350,6 +463,7 @@ async function fetchTodaysRaceResults() {
       }
     }
     
+    console.log(`Processed ${formattedRaces.length} races with results`);
     return formattedRaces;
   } catch (error) {
     console.error('Error fetching today\'s race results:', error.message);
@@ -359,92 +473,6 @@ async function fetchTodaysRaceResults() {
     }
     return [];
   }
-}
-
-// Find race results for a specific track
-function findTrackResults(trackName) {
-  if (!todaysRaceResults || !todaysRaceResults.length) {
-    return null;
-  }
-  
-  // Clean the track name for comparison
-  const cleanedTrackName = trackName.toLowerCase().trim();
-  
-  // Find all races for this track
-  return todaysRaceResults.filter(race => {
-    const raceTrackName = (race.track_name || '').toLowerCase().trim();
-    return raceTrackName === cleanedTrackName || 
-           raceTrackName.includes(cleanedTrackName) || 
-           cleanedTrackName.includes(raceTrackName);
-  });
-}
-
-// Find a horse in race results
-function findHorseInResults(races, horseName) {
-  console.log(`Looking for horse: ${horseName} in ${races.length} races`);
-  
-  const cleanedHorseName = cleanHorseName(horseName);
-  
-  for (const race of races) {
-    for (const horse of race.results) {
-      const cleanedResultHorse = cleanHorseName(horse.horse_name);
-      
-      // Check for exact match first
-      if (cleanedResultHorse === cleanedHorseName) {
-        console.log(`Found exact match for ${horseName} at position ${horse.position}`);
-        return {
-          ...horse,
-          race_id: race.race_id,
-          race_name: race.race_name,
-          total_runners: race.total_runners
-        };
-      }
-      
-      // Check if result horse name contains the bet horse name
-      if (cleanedResultHorse.includes(cleanedHorseName) || 
-          cleanedHorseName.includes(cleanedResultHorse)) {
-        console.log(`Found partial match for ${horseName} -> ${horse.horse_name} at position ${horse.position}`);
-        return {
-          ...horse,
-          race_id: race.race_id,
-          race_name: race.race_name,
-          total_runners: race.total_runners
-        };
-      }
-    }
-  }
-  
-  console.log(`No match found for horse: ${horseName}`);
-  return null;
-}
-
-// Calculate CLV for multiple bets
-function calculateCLVForMultiple(bet, combinedBSP) {
-  if (!combinedBSP || combinedBSP <= 0) {
-    return null;
-  }
-  
-  const betOdds = parseFloat(bet.odds);
-  
-  if (isNaN(betOdds)) {
-    return null;
-  }
-  
-  // CLV formula: (bet_odds / bsp_odds - 1) * 100
-  const clv = (betOdds / combinedBSP - 1) * 100;
-  return Math.round(clv * 100) / 100; // Round to 2 decimal places
-}
-
-// Calculate CLV Stake for multiple bets
-function calculateCLVStakeForMultiple(bet, combinedBSP) {
-  const clv = calculateCLVForMultiple(bet, combinedBSP);
-  
-  if (clv === null) {
-    return null;
-  }
-  
-  // CLV Stake = CLV * Stake / 100
-  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
 }
 
 // Determine bet result (win, place, loss) based on number of runners
@@ -599,6 +627,35 @@ function calculateCLV(bet, horseResult) {
 // Calculate CLV Stake (value captured by stake)
 function calculateCLVStake(bet, horseResult) {
   const clv = calculateCLV(bet, horseResult);
+  
+  if (clv === null) {
+    return null;
+  }
+  
+  // CLV Stake = CLV * Stake / 100
+  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
+}
+
+// Calculate CLV for multiple bets
+function calculateCLVForMultiple(bet, combinedBSP) {
+  if (!combinedBSP || combinedBSP <= 0) {
+    return null;
+  }
+  
+  const betOdds = parseFloat(bet.odds);
+  
+  if (isNaN(betOdds)) {
+    return null;
+  }
+  
+  // CLV formula: (bet_odds / bsp_odds - 1) * 100
+  const clv = (betOdds / combinedBSP - 1) * 100;
+  return Math.round(clv * 100) / 100; // Round to 2 decimal places
+}
+
+// Calculate CLV Stake for multiple bets
+function calculateCLVStakeForMultiple(bet, combinedBSP) {
+  const clv = calculateCLVForMultiple(bet, combinedBSP);
   
   if (clv === null) {
     return null;
