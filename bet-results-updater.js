@@ -2,11 +2,18 @@ require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 
-// Configuration
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const racingApiUsername = process.env.RACING_API_USERNAME;
-const racingApiPassword = process.env.RACING_API_PASSWORD;
+// Configuration with fallback values and multiple environment variable checks
+const supabaseUrl = process.env.SUPABASE_URL || 
+                   process.env.NEXT_PUBLIC_SUPABASE_URL || 
+                   'https://gwvnmzfpnuwxcqtewbtl.supabase.co';
+
+const supabaseKey = process.env.SUPABASE_KEY || 
+                   process.env.SUPABASE_SERVICE_ROLE_KEY || 
+                   process.env.SUPABASE_ANON_KEY ||
+                   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3dm5temZwbnV3eGNxdGV3YnRsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTcwOTc1NDY3MCwiZXhwIjoyMDI1MzMwNjcwfQ.uZCQGcFm1mGSrKAcqbfgVx-YsNWlb-4iKLwRH5GQaRY';
+
+const racingApiUsername = process.env.RACING_API_USERNAME || 'KQ9W7rQeAHWMUgxH93ie3yEc';
+const racingApiPassword = process.env.RACING_API_PASSWORD || 'T5BoPivL3Q2h6RhCdLv4EwZu';
 const racingApiBase = 'https://api.theracingapi.com/v1';
 
 // Initialize Supabase client
@@ -39,6 +46,7 @@ const cleanHorseName = (name) => {
 // Main function to update bet results
 async function updateBetResults() {
   console.log('Starting bet results update process...');
+  console.log(`Using Supabase URL: ${supabaseUrl.substring(0, 20)}...`);
   
   try {
     // Try with multiple status values to find pending bets
