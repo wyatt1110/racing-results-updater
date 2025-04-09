@@ -2,74 +2,32 @@ require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const fs = require('fs');
+const path = require('path');
 
-// Configuration with fallback values and multiple environment variable checks
-const supabaseUrl = process.env.SUPABASE_URL || 
-                   process.env.NEXT_PUBLIC_SUPABASE_URL || 
-                   'https://gwvnmzfpnuwxcqtewbtl.supabase.co';
-
-const supabaseKey = process.env.SUPABASE_KEY || 
-                   process.env.SUPABASE_SERVICE_ROLE_KEY || 
-                   process.env.SUPABASE_ANON_KEY ||
-                   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3dm5temZwbnV3eGNxdGV3YnRsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTcwOTc1NDY3MCwiZXhwIjoyMDI1MzMwNjcwfQ.uZCQGcFm1mGSrKAcqbfgVx-YsNWlb-4iKLwRH5GQaRY';
-
+// Configuration
+const supabaseUrl = process.env.SUPABASE_URL || 'https://gwvnmzfpnuwxcqtewbtl.supabase.co';
+const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3dm5temZwbnV3eGNxdGV3YnRsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTcwOTc1NDY3MCwiZXhwIjoyMDI1MzMwNjcwfQ.uZCQGcFm1mGSrKAcqbfgVx-YsNWlb-4iKLwRH5GQaRY';
 const racingApiUsername = process.env.RACING_API_USERNAME || 'KQ9W7rQeAHWMUgxH93ie3yEc';
 const racingApiPassword = process.env.RACING_API_PASSWORD || 'T5BoPivL3Q2h6RhCdLv4EwZu';
 const racingApiBase = 'https://api.theracingapi.com/v1';
 
-// Initialize Supabase client
-const supabase = createClient(supabaseUrl, supabaseKey, {
-  auth: {
-    persistSession: false,
-    autoRefreshToken: false,
-  }
-});
-
-// Create axios instance with authentication
+// Initialize clients
+const supabase = createClient(supabaseUrl, supabaseKey);
 const racingApi = axios.create({
   baseURL: racingApiBase,
-  auth: {
-    username: racingApiUsername,
-    password: racingApiPassword
-  }
+  auth: { username: racingApiUsername, password: racingApiPassword }
 });
 
-// Helper functions
-const standardizeDate = (dateString) => {
-  const date = new Date(dateString);
-  return date.toISOString().split('T')[0];
-};
+// Sleep function for delay between API calls
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const cleanHorseName = (name) => {
-  if (!name) return '';
-  // Remove country codes like (GB), (IRE), etc.
-  return name.replace(/\([A-Z]{2,3}\)$/g, '').toLowerCase().trim();
-};
-
-// Simplify horse name further by removing spaces, apostrophes, etc.
-const simplifyHorseName = (name) => {
-  if (!name) return '';
-  return name.toLowerCase()
-    .replace(/[^a-z0-9]/g, '') // Remove all non-alphanumeric characters
-    .trim();
-};
-
-// Extract numeric value from ovr_btn field
-const extractNumericValue = (value) => {
-  if (value === null || value === undefined) return null;
-  
-  // If already a number, return as is
-  if (typeof value === 'number') return value;
-  
-  // If string, convert to number
-  if (typeof value === 'string') {
-    // Remove any non-numeric characters except decimal point
-    const numericStr = value.replace(/[^0-9.]/g, '');
-    if (numericStr === '') return 0;
-    return parseFloat(numericStr);
-  }
-  
-  return null;
+// Track codes map (hardcoded for simplicity)
+const TRACK_CODES = {
+  'catterick': 'crs_19734',
+  'nottingham': 'crs_38742',
+  'leopardstown': 'crs_32789',
+  'kempton': 'crs_29348',
+  'taunton': 'crs_23985'
 };
 
 // Main function to update bet results
@@ -78,7 +36,7 @@ async function updateBetResults() {
   console.log(`Using Supabase URL: ${supabaseUrl.substring(0, 20)}...`);
   
   try {
-    // First, let's check all status values to debug
+    // Check status values for debugging
     const { data: statusCheck, error: statusError } = await supabase
       .from('racing_bets')
       .select('status')
@@ -91,7 +49,7 @@ async function updateBetResults() {
       console.log(`Found these status values in the database: ${JSON.stringify(uniqueStatuses)}`);
     }
     
-    // Fetch pending bets using case-insensitive matching for greater flexibility
+    // Fetch pending bets
     let { data: pendingBets, error: betsError } = await supabase
       .from('racing_bets')
       .select('*')
@@ -101,121 +59,104 @@ async function updateBetResults() {
       throw new Error(`Error fetching pending bets: ${betsError.message}`);
     }
     
-    console.log(`Found ${pendingBets ? pendingBets.length : 0} pending bets to process`);
+    console.log(`Found ${pendingBets?.length || 0} pending bets to process`);
     
     if (!pendingBets || pendingBets.length === 0) {
       console.log('No pending bets found to update.');
       return { success: true, updated: 0, total: 0 };
     }
     
-    // Debug: Log the first bet to see field structure
+    // Log a sample bet
     console.log(`Sample pending bet: ${JSON.stringify(pendingBets[0], null, 2)}`);
     
-    // Get all unique tracks from bets to minimize API calls
-    const uniqueTracks = new Set();
-    pendingBets.forEach(bet => {
-      if (bet.track_name) {
-        if (bet.track_name.includes('/')) {
-          // Handle multiple tracks in one bet
-          bet.track_name.split('/').forEach(track => uniqueTracks.add(track.trim()));
-        } else {
-          uniqueTracks.add(bet.track_name.trim());
-        }
-      }
-    });
+    // Group bets by track and date
+    const trackDateGroups = groupBetsByTrackAndDate(pendingBets);
     
-    console.log(`Found ${uniqueTracks.size} unique tracks to process: ${[...uniqueTracks].join(', ')}`);
+    // Print tracks we need to process
+    const uniqueTracks = Object.keys(trackDateGroups);
+    console.log(`Found ${uniqueTracks.length} unique tracks to process: ${uniqueTracks.join(', ')}`);
     
-    // First try to get results for all tracks at once
-    const allResults = await fetchTodaysResultsRaw();
-    if (!allResults) {
-      console.log('Failed to fetch all results, nothing to update');
-      return { success: true, updated: 0, total: pendingBets.length };
-    }
-    
-    console.log('Processing API response to extract horse results...');
-    
-    // Extract all horse results and flatten into a searchable structure
-    const allHorses = extractAllHorseData(allResults);
-    
-    // Log the number of horses we found
-    console.log(`Found a total of ${allHorses.length} horse results`);
-    
-    // Save the extracted horses for debugging
-    try {
-      fs.writeFileSync('all_horses_extracted.json', JSON.stringify(allHorses, null, 2));
-      console.log('Saved all extracted horse data to all_horses_extracted.json');
-    } catch (err) {
-      console.log('Failed to save horses json:', err.message);
-    }
-    
-    // If we found no horses, we can't update anything
-    if (allHorses.length === 0) {
-      console.log('No horse results found, nothing to update');
-      return { success: true, updated: 0, total: pendingBets.length };
-    }
-    
-    // Create a map of tracks for quick reference
-    const trackMap = {};
-    
-    allHorses.forEach(horse => {
-      const trackName = cleanHorseName(horse.track_name);
-      if (!trackMap[trackName]) {
-        trackMap[trackName] = [];
-      }
-      trackMap[trackName].push(horse);
-    });
-    
-    console.log(`Available tracks in results: ${Object.keys(trackMap).join(', ')}`);
-    
-    // Process each pending bet
-    let updatedCount = 0;
-    let foundMatchCount = 0;
-    let noMatchCount = 0;
-    let errorCount = 0;
-    
-    for (const bet of pendingBets) {
-      try {
-        console.log(`\nProcessing bet ID: ${bet.id}`);
-        console.log(`Horse: ${bet.horse_name || 'N/A'}, Track: ${bet.track_name || 'N/A'}`);
-        
-        // Check if this is a multiple bet (contains '/' in horse_name)
-        if (bet.horse_name && bet.horse_name.includes('/')) {
-          const matchFound = await processMultipleBet(bet, allHorses);
-          if (matchFound) {
-            updatedCount++;
-            foundMatchCount++;
-          } else {
-            noMatchCount++;
-          }
-        } else {
-          const matchFound = await processSingleBet(bet, allHorses, trackMap);
-          if (matchFound) {
-            updatedCount++;
-            foundMatchCount++;
-          } else {
-            noMatchCount++;
-          }
-        }
-      } catch (betError) {
-        console.error(`Error processing bet ID ${bet.id}:`, betError);
-        errorCount++;
-      }
-    }
-    
-    console.log(`\nResults Summary:`);
-    console.log(`- Total bets processed: ${pendingBets.length}`);
-    console.log(`- Matches found and updated: ${foundMatchCount}`);
-    console.log(`- No matches found: ${noMatchCount}`);
-    console.log(`- Errors encountered: ${errorCount}`);
-    
-    return { 
-      success: true, 
-      updated: updatedCount, 
+    // Results storage
+    const results = {
       total: pendingBets.length,
-      matches: foundMatchCount,
-      noMatches: noMatchCount,
-      errors: errorCount
+      updated: 0,
+      noMatch: 0,
+      errors: 0
+    };
+    
+    // Process each track with a separate API call
+    for (const [track, dateGroups] of Object.entries(trackDateGroups)) {
+      for (const [date, bets] of Object.entries(dateGroups)) {
+        console.log(`\nProcessing track: ${track}, date: ${date}, bets: ${bets.length}`);
+        
+        // Get course ID for this track
+        const courseId = TRACK_CODES[track.toLowerCase()] || null;
+        if (courseId) {
+          console.log(`Found course ID for ${track}: ${courseId}`);
+        } else {
+          console.log(`No course ID found for ${track}, will use track name only`);
+        }
+        
+        // Fetch results for this track and date
+        const horses = await fetchTrackResults(track, courseId, date);
+        
+        if (horses.length === 0) {
+          console.log(`No horses found for ${track} on ${date}, skipping ${bets.length} bets`);
+          results.noMatch += bets.length;
+          continue;
+        }
+        
+        console.log(`Found ${horses.length} horses for ${track} on ${date}`);
+        
+        // Log a few sample horses
+        if (horses.length > 0) {
+          console.log('Sample horses:');
+          horses.slice(0, 3).forEach(h => {
+            console.log(`- ${h.horse_name} (Position: ${h.position})`);
+          });
+        }
+        
+        // Process each bet for this track/date
+        for (const bet of bets) {
+          try {
+            // Process the bet
+            const isMultiple = bet.horse_name && bet.horse_name.includes('/');
+            const success = isMultiple 
+              ? await processMultipleBet(bet, horses)
+              : await processSingleBet(bet, horses);
+              
+            if (success) {
+              results.updated++;
+            } else {
+              results.noMatch++;
+            }
+          } catch (err) {
+            console.error(`Error processing bet ID ${bet.id}:`, err.message);
+            results.errors++;
+          }
+        }
+        
+        // Wait before next API call
+        if (Object.keys(trackDateGroups).length > 1) {
+          console.log('Waiting 15 seconds before next API call...');
+          await sleep(15000);
+        }
+      }
+    }
+    
+    // Print results summary
+    console.log('\nResults Summary:');
+    console.log(`- Total bets processed: ${results.total}`);
+    console.log(`- Matches found and updated: ${results.updated}`);
+    console.log(`- No matches found: ${results.noMatch}`);
+    console.log(`- Errors encountered: ${results.errors}`);
+    
+    return {
+      success: true,
+      updated: results.updated,
+      total: results.total,
+      noMatches: results.noMatch,
+      errors: results.errors
     };
     
   } catch (error) {
@@ -224,312 +165,246 @@ async function updateBetResults() {
   }
 }
 
-// Function to extract all horse data from any API response structure using deep recursion
-function extractAllHorseData(apiResponse) {
-  const allExtractedHorses = [];
-  const tracks = new Set();
+// Group bets by track and date
+function groupBetsByTrackAndDate(bets) {
+  const groups = {};
   
-  // Create a recursive function to find arrays with position, horse name, etc.
-  const findHorseData = (obj, path = '', contextInfo = {}) => {
-    if (!obj || typeof obj !== 'object') return;
+  bets.forEach(bet => {
+    if (!bet.track_name || !bet.race_date) return;
     
-    // Build context from path and current object
-    const currentContext = { ...contextInfo };
-    
-    // Extract important context fields from current object
-    if (obj.meeting_name) currentContext.meeting_name = obj.meeting_name;
-    if (obj.course) currentContext.course = obj.course;
-    if (obj.venue) currentContext.venue = obj.venue;
-    if (obj.race_id) currentContext.race_id = obj.race_id;
-    if (obj.race_name) currentContext.race_name = obj.race_name;
-    if (obj.time) currentContext.time = obj.time;
-    
-    // Check if this object looks like a horse/runner
-    const hasPosition = obj.position !== undefined || obj.finish_position !== undefined;
-    const hasHorseName = obj.horse !== undefined || obj.name !== undefined;
-    const hasRaceData = obj.sp !== undefined || obj.sp_dec !== undefined || 
-                        obj.btn !== undefined || obj.ovr_btn !== undefined ||
-                        obj.bsp !== undefined || obj.beaten_distance !== undefined;
-                        
-    if (hasPosition && hasHorseName) {
-      // Determine track name from context
-      const trackName = currentContext.meeting_name || currentContext.course || 
-                      currentContext.venue || 'Unknown';
+    // Handle multiple bets (with multiple tracks)
+    if (bet.horse_name && bet.horse_name.includes('/') && bet.track_name.includes('/')) {
+      const horses = bet.horse_name.split('/').map(h => h.trim());
+      const tracks = bet.track_name.split('/').map(t => t.trim());
       
-      tracks.add(trackName);
+      // If number of horses and tracks match, treat as separate bets for API calls
+      if (horses.length === tracks.length) {
+        for (let i = 0; i < tracks.length; i++) {
+          const track = tracks[i];
+          const date = bet.race_date.split('T')[0];
+          
+          if (!groups[track]) groups[track] = {};
+          if (!groups[track][date]) groups[track][date] = [];
+          groups[track][date].push(bet);
+        }
+      } else {
+        // If they don't match, just use the first track
+        const track = tracks[0];
+        const date = bet.race_date.split('T')[0];
+        
+        if (!groups[track]) groups[track] = {};
+        if (!groups[track][date]) groups[track][date] = [];
+        groups[track][date].push(bet);
+      }
+    } else {
+      // Single bets
+      const track = bet.track_name.trim();
+      const date = bet.race_date.split('T')[0];
       
-      // Extract horse data
-      allExtractedHorses.push({
-        horse_name: obj.horse || obj.name || 'Unknown',
-        position: obj.position || obj.finish_position || 'Unknown',
-        bsp: obj.bsp || obj.sp_dec || obj.sp || null,
-        sp: obj.sp_dec || obj.sp || null,
-        ovr_btn: obj.ovr_btn || obj.beaten_distance || obj.btn || '0',
-        btn: obj.btn || obj.beaten_margin || '0',
-        track_name: trackName,
-        race_id: currentContext.race_id || '',
-        race_time: currentContext.time || '',
-        race_name: currentContext.race_name || '',
-        simplified_name: simplifyHorseName(obj.horse || obj.name || ''),
-        total_runners: currentContext.total_runners || 0
-      });
+      if (!groups[track]) groups[track] = {};
+      if (!groups[track][date]) groups[track][date] = [];
+      groups[track][date].push(bet);
+    }
+  });
+  
+  return groups;
+}
+
+// Fetch results for a specific track and date
+async function fetchTrackResults(trackName, courseId, date) {
+  console.log(`Fetching results for track: ${trackName}, date: ${date}`);
+  
+  try {
+    // Build the API request options
+    let params = { 
+      start_date: date,
+      end_date: date
+    };
+    
+    // Add course ID if available
+    if (courseId) {
+      params.course = [courseId];
     }
     
-    // If this is an array, check each element and update context
-    if (Array.isArray(obj)) {
-      // Check if this looks like a runners array (contains objects with position/horse fields)
-      let isRunnersArray = false;
-      if (obj.length > 0) {
-        const sampleItem = obj[0];
-        if (typeof sampleItem === 'object' && sampleItem !== null) {
-          isRunnersArray = (sampleItem.position !== undefined || sampleItem.finish_position !== undefined) && 
-                          (sampleItem.horse !== undefined || sampleItem.name !== undefined);
+    const requestUrl = `/results?${new URLSearchParams(params).toString()}`;
+    console.log(`API Request: ${requestUrl}`);
+    
+    // Make the API call
+    const response = await racingApi.get('/results', { params });
+    
+    // Save raw response for debugging
+    const outputFile = `${trackName.replace(/\s+/g, '_')}_${date}_response.json`;
+    fs.writeFileSync(outputFile, JSON.stringify(response.data, null, 2));
+    console.log(`Saved raw API response to ${outputFile}`);
+    
+    // Extract horse data
+    const horses = extractHorsesFromResponse(response.data, trackName);
+    
+    if (horses.length === 0) {
+      console.log(`No horses found in response, trying alternative endpoints...`);
+      
+      // Try cards endpoint
+      try {
+        const cardsResponse = await racingApi.get('/cards', { 
+          params: { date }
+        });
+        
+        const cardsOutputFile = `${trackName.replace(/\s+/g, '_')}_${date}_cards_response.json`;
+        fs.writeFileSync(cardsOutputFile, JSON.stringify(cardsResponse.data, null, 2));
+        
+        const cardsHorses = extractHorsesFromResponse(cardsResponse.data, trackName);
+        if (cardsHorses.length > 0) {
+          console.log(`Found ${cardsHorses.length} horses from cards endpoint`);
+          return cardsHorses;
         }
+      } catch (err) {
+        console.log(`Cards endpoint failed: ${err.message}`);
       }
-      
-      // If this is a runners array, update context with total runners count
-      if (isRunnersArray) {
-        currentContext.total_runners = obj.length;
+    }
+    
+    return horses;
+    
+  } catch (error) {
+    console.error(`Error fetching results for ${trackName} on ${date}:`, error.message);
+    if (error.response) {
+      console.error(`API Status: ${error.response.status}`);
+      if (error.response.data) {
+        console.error(`API Response: ${JSON.stringify(error.response.data).substring(0, 200)}...`);
       }
+    }
+    return [];
+  }
+}
+
+// Extract horses from API response with target track filter
+function extractHorsesFromResponse(apiData, targetTrack) {
+  const horses = [];
+  const cleanTargetTrack = cleanName(targetTrack);
+  
+  // Recursive function to find horse data
+  function findHorses(obj, context = {}) {
+    if (!obj || typeof obj !== 'object') return;
+    
+    // Update context with track info
+    if (obj.meeting_name) context.track = obj.meeting_name;
+    if (obj.course) context.track = obj.course;
+    if (obj.venue) context.track = obj.venue;
+    if (obj.track) context.track = obj.track;
+    
+    // Update context with race info
+    if (obj.time) context.time = obj.time;
+    if (obj.race_time) context.time = obj.race_time;
+    if (obj.race_id) context.race_id = obj.race_id;
+    if (obj.id && !context.race_id) context.race_id = obj.id;
+    if (obj.race_name) context.race_name = obj.race_name;
+    if (obj.name && !context.race_name) context.race_name = obj.name;
+    if (obj.runners?.length) context.total_runners = obj.runners.length;
+    if (obj.results?.length) context.total_runners = obj.results.length;
+    
+    // Check if this object is a horse/runner
+    if ((obj.horse || obj.name) && 
+        (obj.position !== undefined || obj.finish_position !== undefined)) {
       
-      // Process each array item with updated context
-      obj.forEach((item, index) => {
-        findHorseData(item, `${path}[${index}]`, currentContext);
-      });
+      const trackName = context.track || targetTrack;
+      const cleanTrack = cleanName(trackName);
+      
+      // Only include horses from the target track
+      if (isSimilarTrack(cleanTrack, cleanTargetTrack)) {
+        horses.push({
+          horse_name: obj.horse || obj.name,
+          track_name: trackName,
+          position: obj.position || obj.finish_position,
+          sp: obj.sp_dec || obj.sp || null,
+          bsp: obj.bsp || null,
+          ovr_btn: obj.ovr_btn || obj.btn || '0',
+          btn: obj.btn || '0',
+          race_time: context.time || '',
+          race_id: context.race_id || '',
+          race_name: context.race_name || '',
+          total_runners: context.total_runners || 0,
+          simplified_name: simplifyHorseName(obj.horse || obj.name || '')
+        });
+      }
       return;
     }
     
-    // Otherwise, recurse through object properties
+    // Process arrays
+    if (Array.isArray(obj)) {
+      obj.forEach(item => findHorses(item, {...context}));
+      return;
+    }
+    
+    // Process object properties
     for (const [key, value] of Object.entries(obj)) {
-      findHorseData(value, path ? `${path}.${key}` : key, currentContext);
+      findHorses(value, {...context});
     }
-  };
-  
-  // Start recursive scan of API response
-  findHorseData(apiResponse);
-  
-  if (tracks.size > 0) {
-    console.log(`Deep search found horses at ${tracks.size} tracks: ${[...tracks].join(', ')}`);
   }
   
-  return allExtractedHorses;
+  findHorses(apiData);
+  
+  if (horses.length > 0) {
+    console.log(`Found ${horses.length} horses for ${targetTrack}`);
+    
+    // Save horses to file for debugging
+    const outputFile = `${targetTrack.replace(/\s+/g, '_')}_horses.json`;
+    fs.writeFileSync(outputFile, JSON.stringify(horses, null, 2));
+  } else {
+    console.log(`No horses found for ${targetTrack}`);
+  }
+  
+  return horses;
 }
 
-// Fetch today's race results for all tracks
-async function fetchTodaysResultsRaw() {
-  try {
-    console.log('Fetching today\'s race results...');
-    
-    // Make the API call
-    const response = await racingApi.get('/results/today');
-    
-    // Save the raw response for debugging
-    try {
-      fs.writeFileSync('results_raw_response.json', JSON.stringify(response.data, null, 2));
-      console.log('Saved raw API response to results_raw_response.json');
-    } catch (writeError) {
-      console.log('Could not save response to file:', writeError.message);
-    }
-    
-    // Check if we have the expected response structure
-    if (!response.data) {
-      console.log('Invalid API response: no data received');
-      return null;
-    }
-    
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching today\'s race results:', error.message);
-    if (error.response) {
-      console.error('API Response Status:', error.response.status);
-      console.error('API Response Data:', JSON.stringify(error.response.data || {}).substring(0, 200) + '...');
-    }
-    return null;
-  }
-}
-
-// Find a horse in the allHorses array
-function findHorseInResults(allHorses, horseName, trackName, trackMap) {
-  if (!horseName) return null;
+// Process a single bet
+async function processSingleBet(bet, horses) {
+  console.log(`\nProcessing bet ID: ${bet.id}`);
+  console.log(`Horse: ${bet.horse_name}, Track: ${bet.track_name}`);
   
-  const cleanHorse = cleanHorseName(horseName);
-  const cleanTrack = cleanHorseName(trackName || '');
-  const simplifiedHorse = simplifyHorseName(horseName);
-  
-  console.log(`Looking for horse: "${cleanHorse}" at track: "${cleanTrack}"`);
-  
-  // Try all matching strategies from most specific to least
-  
-  // 1. Exact match on horse name and track name
-  if (cleanTrack) {
-    const exactMatch = allHorses.find(horse => 
-      cleanHorseName(horse.horse_name) === cleanHorse && 
-      cleanHorseName(horse.track_name) === cleanTrack
-    );
-    
-    if (exactMatch) {
-      console.log(`MATCH FOUND: Exact match for "${horseName}" at "${trackName}", position: ${exactMatch.position}`);
-      return exactMatch;
-    }
-    
-    // 2. Exact horse name, partial track name
-    const trackPartialMatch = allHorses.find(horse => 
-      cleanHorseName(horse.horse_name) === cleanHorse && 
-      (cleanHorseName(horse.track_name).includes(cleanTrack) || 
-       cleanTrack.includes(cleanHorseName(horse.track_name)))
-    );
-    
-    if (trackPartialMatch) {
-      console.log(`MATCH FOUND: Exact horse match "${horseName}" at similar track "${trackPartialMatch.track_name}", position: ${trackPartialMatch.position}`);
-      return trackPartialMatch;
-    }
-    
-    // 3. Simplified name match with track match
-    const simplifiedMatch = allHorses.find(horse => 
-      horse.simplified_name === simplifiedHorse && 
-      (cleanHorseName(horse.track_name) === cleanTrack || 
-       cleanHorseName(horse.track_name).includes(cleanTrack) || 
-       cleanTrack.includes(cleanHorseName(horse.track_name)))
-    );
-    
-    if (simplifiedMatch) {
-      console.log(`MATCH FOUND: Simplified name match "${horseName}" → "${simplifiedMatch.horse_name}" at ${simplifiedMatch.track_name}, position: ${simplifiedMatch.position}`);
-      return simplifiedMatch;
-    }
-  }
-  
-  // 4. Partial horse name match with track match
-  if (cleanTrack) {
-    const partialMatch = allHorses.find(horse => {
-      const horseNameClean = cleanHorseName(horse.horse_name);
-      const trackNameClean = cleanHorseName(horse.track_name);
-      
-      return (horseNameClean.includes(cleanHorse) || cleanHorse.includes(horseNameClean)) && 
-             (trackNameClean === cleanTrack || 
-              trackNameClean.includes(cleanTrack) || 
-              cleanTrack.includes(trackNameClean));
-    });
-    
-    if (partialMatch) {
-      console.log(`MATCH FOUND: Partial match for "${horseName}" → "${partialMatch.horse_name}" at ${partialMatch.track_name}, position: ${partialMatch.position}`);
-      return partialMatch;
-    }
-  }
-  
-  // 5. Fuzzy name match - check if starting characters match
-  if (cleanTrack) {
-    const fuzzyMatch = allHorses.find(horse => {
-      const horseNameClean = cleanHorseName(horse.horse_name);
-      const trackNameClean = cleanHorseName(horse.track_name);
-      
-      // Match if first 3-4 characters are the same
-      const minLength = Math.min(3, Math.min(horseNameClean.length, cleanHorse.length));
-      const horsesStartSame = horseNameClean.substring(0, minLength) === cleanHorse.substring(0, minLength);
-      
-      return horsesStartSame && 
-             (trackNameClean === cleanTrack || 
-              trackNameClean.includes(cleanTrack) || 
-              cleanTrack.includes(trackNameClean));
-    });
-    
-    if (fuzzyMatch) {
-      console.log(`MATCH FOUND: Fuzzy match for "${horseName}" → "${fuzzyMatch.horse_name}" at ${fuzzyMatch.track_name}, position: ${fuzzyMatch.position}`);
-      return fuzzyMatch;
-    }
-  }
-  
-  // 6. Just match horse name as last resort
-  const horseOnlyMatch = allHorses.find(horse => {
-    const horseNameClean = cleanHorseName(horse.horse_name);
-    return horseNameClean === cleanHorse || 
-           horseNameClean.includes(cleanHorse) || 
-           cleanHorse.includes(horseNameClean);
-  });
-  
-  if (horseOnlyMatch) {
-    console.log(`MATCH FOUND: Horse-only match for "${horseName}" at ${horseOnlyMatch.track_name}, position: ${horseOnlyMatch.position}`);
-    return horseOnlyMatch;
-  }
-  
-  // 7. Last resort - try simplified name match without track
-  const simplifiedOnlyMatch = allHorses.find(horse => 
-    horse.simplified_name === simplifiedHorse
-  );
-  
-  if (simplifiedOnlyMatch) {
-    console.log(`MATCH FOUND: Simplified name only match "${horseName}" → "${simplifiedOnlyMatch.horse_name}" at ${simplifiedOnlyMatch.track_name}, position: ${simplifiedOnlyMatch.position}`);
-    return simplifiedOnlyMatch;
-  }
-  
-  // If track matches but no horse match, show all horses at that track
-  if (cleanTrack && trackMap && trackMap[cleanTrack]) {
-    console.log(`Horses at track similar to "${trackName}" (only showing first 10):`);
-    trackMap[cleanTrack].slice(0, 10).forEach(h => {
-      console.log(`- ${h.horse_name} (position: ${h.position})`);
-    });
-  }
-  
-  console.log(`NO MATCH: Horse "${horseName}" not found`);
-  return null;
-}
-
-// Process a single horse bet
-async function processSingleBet(bet, allHorses, trackMap) {
-  // Skip if missing essential data
   if (!bet.horse_name) {
     console.log(`Skipping bet ID ${bet.id} - missing horse name`);
     return false;
   }
   
-  // Find the horse in the results
-  const horseResult = findHorseInResults(allHorses, bet.horse_name, bet.track_name, trackMap);
+  // Find horse in results
+  const horseResult = findHorseMatch(bet.horse_name, horses);
   
   if (!horseResult) {
-    console.log(`No match found for bet ID ${bet.id}`);
+    console.log(`No match found for ${bet.horse_name}`);
     return false;
   }
   
-  // Get number of runners in the race
+  console.log(`MATCH FOUND: ${bet.horse_name} → ${horseResult.horse_name} (Position: ${horseResult.position})`);
+  
+  // Calculate returns
   const numRunners = parseInt(horseResult.total_runners) || 0;
-  console.log(`Race has ${numRunners} runners`);
-  
-  // Determine if this is an each-way bet
-  const isEachWay = bet.each_way === true;
-  
-  // Determine bet result (win, place, loss)
-  const betType = isEachWay ? 'each-way' : (bet.bet_type || 'win');
+  const betType = bet.each_way === true ? 'each-way' : (bet.bet_type || 'win');
   const betResult = determineBetResult(horseResult, betType, numRunners);
   
-  // Calculate bet returns based on result
+  // Calculate bet returns
   const returns = calculateReturns(bet, betResult, horseResult, numRunners);
   
-  // Map betResult to status field value
+  // Map betResult to status
   let status = 'Pending';
-  if (betResult === 'win' || betResult === 'win-place') {
-    status = 'Won';
-  } else if (betResult === 'place') {
-    status = 'Placed';
-  } else if (betResult === 'loss') {
-    status = 'Lost';
-  } else if (betResult === 'void') {
-    status = 'Void';
-  }
+  if (betResult === 'win' || betResult === 'win-place') status = 'Won';
+  else if (betResult === 'place') status = 'Placed';
+  else if (betResult === 'loss') status = 'Lost';
+  else if (betResult === 'void') status = 'Void';
   
   // Calculate profit/loss
   const profitLoss = returns - bet.stake;
   
-  // Ensure ovr_btn is stored as numeric value
+  // Convert ovr_btn to numeric
   const numericOvrBtn = extractNumericValue(horseResult.ovr_btn);
   
-  // Update the bet in Supabase
-  const { error: updateError } = await supabase
+  // Update bet in Supabase
+  const { error } = await supabase
     .from('racing_bets')
     .update({
       status: status,
       returns: returns,
       profit_loss: profitLoss,
       sp_industry: horseResult.sp || null,
-      ovr_btn: numericOvrBtn, // Use numeric value
+      ovr_btn: numericOvrBtn, // Store as numeric
       closing_line_value: calculateCLV(bet, horseResult),
       clv_stake: calculateCLVStake(bet, horseResult),
       fin_pos: horseResult.position || null,
@@ -537,51 +412,48 @@ async function processSingleBet(bet, allHorses, trackMap) {
     })
     .eq('id', bet.id);
   
-  if (updateError) {
-    throw new Error(`Error updating bet ID ${bet.id}: ${updateError.message}`);
+  if (error) {
+    console.error(`Error updating bet ID ${bet.id}:`, error.message);
+    return false;
   }
   
-  console.log(`Successfully updated bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}, Position: ${horseResult.position}`);
+  console.log(`Successfully updated bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
   return true;
 }
 
-// Process a multiple bet (horses separated by '/')
-async function processMultipleBet(bet, allHorses) {
-  // Split selection by '/'
+// Process a multiple bet
+async function processMultipleBet(bet, horses) {
   const selections = bet.horse_name.split('/').map(s => s.trim());
-  console.log(`Processing multiple bet with ${selections.length} selections: ${selections.join(', ')}`);
-  
-  // Split track names if multiple tracks
   const trackNames = bet.track_name ? bet.track_name.split('/').map(t => t.trim()) : [];
   
-  // Find all horses in the results
+  console.log(`Processing multiple bet with ${selections.length} selections: ${selections.join(', ')}`);
+  
+  // Find all horses in results
   const horseResults = [];
   
   for (let i = 0; i < selections.length; i++) {
-    const selection = selections[i];
-    // Get track name (use the corresponding track if available, otherwise use the first one)
-    const trackName = trackNames[i] || trackNames[0] || '';
+    // We already filtered by track, so just match by horse name
+    const horseResult = findHorseMatch(selections[i], horses);
     
-    const horseResult = findHorseInResults(allHorses, selection, trackName);
     if (!horseResult) {
-      console.log(`No results found for ${selection} at ${trackName || 'any track'}`);
-      return false; // Exit if any horse is not found
+      console.log(`No match found for ${selections[i]}`);
+      return false;
     }
+    
     horseResults.push(horseResult);
   }
   
-  console.log(`Found all ${selections.length} horses in the multiple bet`);
+  console.log(`Found all ${selections.length} horses in multiple bet`);
   
-  // Check if all horses won (for win bets)
+  // Check if all horses won
   const allWon = horseResults.every(hr => parseInt(hr.position) === 1);
   
-  // Format positions for fin_pos field
+  // Format data for update
   const positionsFormatted = horseResults.map(hr => hr.position).join(' / ');
+  const ovrBtnFormatted = horseResults.map(hr => extractNumericValue(hr.ovr_btn) || '0').join(' / ');
+  const spFormatted = horseResults.map(hr => hr.sp || '0').join(' / ');
   
-  // Format BSP values for ovr_btn field
-  const bspFormatted = horseResults.map(hr => hr.bsp || '0').join(' / ');
-  
-  // Calculate combined BSP (multiply all BSPs together)
+  // Calculate combined BSP
   let combinedBSP = 1;
   let allHaveBSP = true;
   
@@ -593,43 +465,25 @@ async function processMultipleBet(bet, allHorses) {
     combinedBSP *= parseFloat(hr.bsp);
   }
   
-  if (!allHaveBSP) {
-    combinedBSP = null;
-  }
+  if (!allHaveBSP) combinedBSP = null;
   
-  // Format SP values for sp_industry field
-  const spFormatted = horseResults.map(hr => hr.sp || '0').join(' / ');
-  
-  // Format ovr_btn values - ensure numeric
-  const ovrBtnFormatted = horseResults.map(hr => extractNumericValue(hr.ovr_btn) || '0').join(' / ');
-  
-  // Determine if this is an each-way bet
-  const isEachWay = bet.each_way === true;
-  
-  // Determine bet result - for multiple bets, all selections must win
+  // Determine bet result
   let status = 'Lost';
-  if ((bet.bet_type === 'win' || !bet.bet_type) && allWon) {
-    status = 'Won';
-  }
+  if ((bet.bet_type === 'win' || !bet.bet_type) && allWon) status = 'Won';
   
   // Calculate returns
-  let returns = 0;
-  if (status === 'Won') {
-    returns = bet.stake * bet.odds;
-  }
-  
-  // Calculate profit/loss
+  const returns = status === 'Won' ? bet.stake * bet.odds : 0;
   const profitLoss = returns - bet.stake;
   
-  // Update the bet in Supabase
-  const { error: updateError } = await supabase
+  // Update bet in Supabase
+  const { error } = await supabase
     .from('racing_bets')
     .update({
       status: status,
       returns: returns,
       profit_loss: profitLoss,
       sp_industry: spFormatted,
-      ovr_btn: ovrBtnFormatted, // Use formatted numeric values
+      ovr_btn: ovrBtnFormatted,
       closing_line_value: allHaveBSP ? calculateCLVForMultiple(bet, combinedBSP) : null,
       clv_stake: allHaveBSP ? calculateCLVStakeForMultiple(bet, combinedBSP) : null,
       fin_pos: positionsFormatted,
@@ -637,137 +491,256 @@ async function processMultipleBet(bet, allHorses) {
     })
     .eq('id', bet.id);
   
-  if (updateError) {
-    throw new Error(`Error updating multiple bet ID ${bet.id}: ${updateError.message}`);
+  if (error) {
+    console.error(`Error updating multiple bet ID ${bet.id}:`, error.message);
+    return false;
   }
   
-  console.log(`Successfully updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}, Positions: ${positionsFormatted}`);
+  console.log(`Successfully updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
   return true;
 }
 
-// Determine bet result (win, place, loss) based on number of runners
-function determineBetResult(horseResult, betType, numRunners) {
-  if (!horseResult || !horseResult.position) {
-    return null;
+// Find horse match in results (we already filtered by track)
+function findHorseMatch(horseName, horses) {
+  if (!horseName || !horses || horses.length === 0) return null;
+  
+  const cleanHorse = cleanHorseName(horseName);
+  const simplifiedHorse = simplifyHorseName(horseName);
+  
+  console.log(`Looking for horse: "${cleanHorse}"`);
+  
+  // Matching strategies in order of priority
+  
+  // 1. Exact name match
+  const exactMatch = horses.find(h => 
+    cleanHorseName(h.horse_name) === cleanHorse
+  );
+  
+  if (exactMatch) {
+    console.log(`MATCH FOUND: Exact match for "${horseName}", position: ${exactMatch.position}`);
+    return exactMatch;
   }
+  
+  // 2. Simplified name match (no spaces or special chars)
+  const simplifiedMatch = horses.find(h => 
+    h.simplified_name === simplifiedHorse
+  );
+  
+  if (simplifiedMatch) {
+    console.log(`MATCH FOUND: Simplified name match "${horseName}" → "${simplifiedMatch.horse_name}", position: ${simplifiedMatch.position}`);
+    return simplifiedMatch;
+  }
+  
+  // 3. Partial name match
+  const partialMatch = horses.find(h => {
+    const horseNameClean = cleanHorseName(h.horse_name);
+    return horseNameClean.includes(cleanHorse) || cleanHorse.includes(horseNameClean);
+  });
+  
+  if (partialMatch) {
+    console.log(`MATCH FOUND: Partial match for "${horseName}" → "${partialMatch.horse_name}", position: ${partialMatch.position}`);
+    return partialMatch;
+  }
+  
+  // 4. Fuzzy match - Levenshtein distance
+  const fuzzyMatch = findClosestMatch(cleanHorse, horses);
+  
+  if (fuzzyMatch) {
+    console.log(`MATCH FOUND: Fuzzy match for "${horseName}" → "${fuzzyMatch.horse_name}", position: ${fuzzyMatch.position}`);
+    return fuzzyMatch;
+  }
+  
+  // Show all horses for debugging
+  console.log(`Available horses (showing first 10):`);
+  horses.slice(0, 10).forEach(h => {
+    console.log(`- ${h.horse_name} (position: ${h.position})`);
+  });
+  
+  console.log(`NO MATCH: Horse "${horseName}" not found`);
+  return null;
+}
+
+// Find the closest match using Levenshtein distance
+function findClosestMatch(horseName, horses) {
+  if (!horseName || !horses || !horses.length) return null;
+  
+  // Levenshtein distance
+  function levenshtein(a, b) {
+    const matrix = [];
+    
+    // Initialize matrix
+    for (let i = 0; i <= b.length; i++) {
+      matrix[i] = [i];
+    }
+    
+    for (let j = 0; j <= a.length; j++) {
+      matrix[0][j] = j;
+    }
+    
+    // Fill matrix
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        const cost = a[j-1] === b[i-1] ? 0 : 1;
+        matrix[i][j] = Math.min(
+          matrix[i-1][j] + 1,      // deletion
+          matrix[i][j-1] + 1,      // insertion
+          matrix[i-1][j-1] + cost  // substitution
+        );
+      }
+    }
+    
+    return matrix[b.length][a.length];
+  }
+  
+  let bestMatch = null;
+  let bestDistance = Infinity;
+  
+  for (const horse of horses) {
+    const distance = levenshtein(horseName, cleanHorseName(horse.horse_name));
+    
+    // Consider good match if distance is less than 30% of name length
+    const threshold = Math.max(3, Math.floor(horseName.length * 0.3));
+    
+    if (distance < threshold && distance < bestDistance) {
+      bestDistance = distance;
+      bestMatch = horse;
+    }
+  }
+  
+  if (bestMatch) {
+    console.log(`Fuzzy match found with distance ${bestDistance}`);
+  }
+  
+  return bestMatch;
+}
+
+// Check if two track names are similar
+function isSimilarTrack(track1, track2) {
+  if (!track1 || !track2) return false;
+  
+  // Exact match
+  if (track1 === track2) return true;
+  
+  // Partial match
+  if (track1.includes(track2) || track2.includes(track1)) return true;
+  
+  // Split track names and check parts
+  const parts1 = track1.split(/[ -]/);
+  const parts2 = track2.split(/[ -]/);
+  
+  // Check if any significant part matches
+  for (const part1 of parts1) {
+    if (part1.length > 3) { 
+      for (const part2 of parts2) {
+        if (part2.length > 3 && part1 === part2) return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+// Helper functions
+function cleanHorseName(name) {
+  if (!name) return '';
+  // Remove country codes like (GB), (IRE), etc.
+  return name.replace(/\s*\([A-Z]{2,3}\)\s*$/g, '').toLowerCase().trim();
+}
+
+function cleanName(name) {
+  if (!name) return '';
+  return name.toLowerCase().trim();
+}
+
+function simplifyHorseName(name) {
+  if (!name) return '';
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function extractNumericValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const numericStr = value.replace(/[^0-9.]/g, '');
+    if (numericStr === '') return 0;
+    return parseFloat(numericStr);
+  }
+  return null;
+}
+
+// Determine bet result (win, place, loss)
+function determineBetResult(horseResult, betType, numRunners) {
+  if (!horseResult || !horseResult.position) return null;
   
   const position = parseInt(horseResult.position, 10);
-  
-  if (isNaN(position)) {
-    return 'void'; // Non-runner or void race
-  }
+  if (isNaN(position)) return 'void';
   
   // Win bet logic
   if (betType === 'win' || betType === 'single') {
     return position === 1 ? 'win' : 'loss';
   }
   
-  // Place bet logic based on number of runners
+  // Place bet logic
   if (betType === 'place') {
-    // Apply place rules based on number of runners
-    if (numRunners <= 7) {
-      return position <= 2 ? 'place' : 'loss';
-    } else if (numRunners <= 12) { 
-      return position <= 3 ? 'place' : 'loss';
-    } else if (numRunners <= 19) {
-      return position <= 4 ? 'place' : 'loss';
-    } else {
-      return position <= 5 ? 'place' : 'loss';
-    }
+    if (numRunners <= 7) return position <= 2 ? 'place' : 'loss';
+    if (numRunners <= 12) return position <= 3 ? 'place' : 'loss';
+    if (numRunners <= 19) return position <= 4 ? 'place' : 'loss';
+    return position <= 5 ? 'place' : 'loss';
   }
   
   // Each-way bet logic
   if (betType === 'each-way') {
-    // Win part
-    if (position === 1) {
-      // Check place part based on number of runners
-      if (numRunners <= 7) {
-        return 'win-place'; // Win and place (top 2)
-      } else if (numRunners <= 12) {
-        return 'win-place'; // Win and place (top 3)
-      } else if (numRunners <= 19) {
-        return 'win-place'; // Win and place (top 4)
-      } else {
-        return 'win-place'; // Win and place (top 5)
-      }
-    } 
-    // Place part only (no win)
-    else if ((numRunners <= 7 && position <= 2) ||
-             (numRunners <= 12 && position <= 3) ||
-             (numRunners <= 19 && position <= 4) ||
-             (numRunners >= 20 && position <= 5)) {
+    if (position === 1) return 'win-place';
+    if ((numRunners <= 7 && position <= 2) ||
+        (numRunners <= 12 && position <= 3) ||
+        (numRunners <= 19 && position <= 4) ||
+        (numRunners >= 20 && position <= 5)) {
       return 'place';
-    } else {
-      return 'loss';
     }
+    return 'loss';
   }
   
   return null;
 }
 
-// Calculate returns based on bet result and number of runners
+// Calculate returns based on bet result
 function calculateReturns(bet, result, horseResult, numRunners) {
-  if (!result || result === 'loss' || result === 'void') {
-    return 0;
-  }
+  if (!result || result === 'loss' || result === 'void') return 0;
   
-  // Determine if this is an each-way bet
   const isEachWay = bet.each_way === true;
   
-  // For win bets
+  // Win bets
   if ((bet.bet_type === 'win' || bet.bet_type === 'single' || !bet.bet_type) && result === 'win') {
     return bet.stake * bet.odds;
   }
   
-  // For place bets - apply different place terms based on runner count
+  // Place bets
   if (bet.bet_type === 'place' && result === 'place') {
     let placeOdds;
     
-    if (numRunners <= 7) {
-      // 1/4 odds for 2 places
-      placeOdds = (bet.odds - 1) / 4 + 1;
-    } else if (numRunners <= 12) {
-      // 1/5 odds for 3 places
-      placeOdds = (bet.odds - 1) / 5 + 1;
-    } else if (numRunners <= 19) {
-      // 1/5 odds for 4 places
-      placeOdds = (bet.odds - 1) / 5 + 1;
-    } else {
-      // 1/6 odds for 5 places
-      placeOdds = (bet.odds - 1) / 6 + 1;
-    }
+    if (numRunners <= 7) placeOdds = (bet.odds - 1) / 4 + 1;
+    else if (numRunners <= 12) placeOdds = (bet.odds - 1) / 5 + 1;
+    else if (numRunners <= 19) placeOdds = (bet.odds - 1) / 5 + 1;
+    else placeOdds = (bet.odds - 1) / 6 + 1;
     
     return bet.stake * placeOdds;
   }
   
-  // For each-way bets
+  // Each-way bets
   if (isEachWay) {
     let returns = 0;
     let placeOdds;
     
-    // Calculate place odds based on number of runners
-    if (numRunners <= 7) {
-      // 1/4 odds for 2 places
-      placeOdds = (bet.odds - 1) / 4 + 1;
-    } else if (numRunners <= 12) {
-      // 1/5 odds for 3 places
-      placeOdds = (bet.odds - 1) / 5 + 1;
-    } else if (numRunners <= 19) {
-      // 1/5 odds for 4 places
-      placeOdds = (bet.odds - 1) / 5 + 1;
-    } else {
-      // 1/6 odds for 5 places
-      placeOdds = (bet.odds - 1) / 6 + 1;
-    }
+    if (numRunners <= 7) placeOdds = (bet.odds - 1) / 4 + 1;
+    else if (numRunners <= 12) placeOdds = (bet.odds - 1) / 5 + 1;
+    else if (numRunners <= 19) placeOdds = (bet.odds - 1) / 5 + 1;
+    else placeOdds = (bet.odds - 1) / 6 + 1;
     
     if (result === 'win-place') {
-      // Win part
-      returns += (bet.stake / 2) * bet.odds;
-      // Place part
-      returns += (bet.stake / 2) * placeOdds;
+      returns += (bet.stake / 2) * bet.odds; // Win part
+      returns += (bet.stake / 2) * placeOdds; // Place part
     } else if (result === 'place') {
-      // Only place part wins
-      returns += (bet.stake / 2) * placeOdds;
+      returns += (bet.stake / 2) * placeOdds; // Only place part wins
     }
     
     return returns;
@@ -776,66 +749,47 @@ function calculateReturns(bet, result, horseResult, numRunners) {
   return 0;
 }
 
-// Calculate CLV (Closing Line Value)
+// Calculate CLV
 function calculateCLV(bet, horseResult) {
-  if (!horseResult.bsp || horseResult.bsp <= 0) {
-    return null;
-  }
+  if (!horseResult.bsp || horseResult.bsp <= 0) return null;
   
   const bspOdds = parseFloat(horseResult.bsp);
   const betOdds = parseFloat(bet.odds);
   
-  if (isNaN(bspOdds) || isNaN(betOdds)) {
-    return null;
-  }
+  if (isNaN(bspOdds) || isNaN(betOdds)) return null;
   
-  // CLV formula: (bet_odds / bsp_odds - 1) * 100
   const clv = (betOdds / bspOdds - 1) * 100;
-  return Math.round(clv * 100) / 100; // Round to 2 decimal places
+  return Math.round(clv * 100) / 100;
 }
 
-// Calculate CLV Stake (value captured by stake)
+// Calculate CLV Stake
 function calculateCLVStake(bet, horseResult) {
   const clv = calculateCLV(bet, horseResult);
+  if (clv === null) return null;
   
-  if (clv === null) {
-    return null;
-  }
-  
-  // CLV Stake = CLV * Stake / 100
-  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
+  return Math.round((clv * bet.stake / 100) * 100) / 100;
 }
 
-// Calculate CLV for multiple bets
+// Multiple bet CLV
 function calculateCLVForMultiple(bet, combinedBSP) {
-  if (!combinedBSP || combinedBSP <= 0) {
-    return null;
-  }
+  if (!combinedBSP || combinedBSP <= 0) return null;
   
   const betOdds = parseFloat(bet.odds);
+  if (isNaN(betOdds)) return null;
   
-  if (isNaN(betOdds)) {
-    return null;
-  }
-  
-  // CLV formula: (bet_odds / bsp_odds - 1) * 100
   const clv = (betOdds / combinedBSP - 1) * 100;
-  return Math.round(clv * 100) / 100; // Round to 2 decimal places
+  return Math.round(clv * 100) / 100;
 }
 
-// Calculate CLV Stake for multiple bets
+// Multiple bet CLV Stake
 function calculateCLVStakeForMultiple(bet, combinedBSP) {
   const clv = calculateCLVForMultiple(bet, combinedBSP);
+  if (clv === null) return null;
   
-  if (clv === null) {
-    return null;
-  }
-  
-  // CLV Stake = CLV * Stake / 100
-  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
+  return Math.round((clv * bet.stake / 100) * 100) / 100;
 }
 
-// Run the main function if invoked directly
+// Run the main function
 if (require.main === module) {
   updateBetResults()
     .then(result => {
