@@ -43,6 +43,9 @@ const cleanHorseName = (name) => {
   return name.toLowerCase().trim();
 };
 
+// Cache for today's race results
+let todaysRaceResults = null;
+
 // Main function to update bet results
 async function updateBetResults() {
   console.log('Starting bet results update process...');
@@ -89,12 +92,24 @@ async function updateBetResults() {
       return { success: true, updated: 0, total: 0 };
     }
     
+    // Fetch today's race results once
+    todaysRaceResults = await fetchTodaysRaceResults();
+    
     // Process each pending bet
     let updatedCount = 0;
     
     for (const bet of pendingBets) {
       try {
         console.log(`Processing bet ID: ${bet.id} for horse: ${bet.horse_name}`);
+        
+        // Only process bets for today's date
+        const today = new Date().toISOString().split('T')[0];
+        const betDate = standardizeDate(bet.race_date);
+        
+        if (betDate !== today) {
+          console.log(`Skipping bet ID ${bet.id} - race date ${betDate} is not today (${today})`);
+          continue;
+        }
         
         // Check if this is a multiple bet (contains '/' in horse_name)
         if (bet.horse_name.includes('/')) {
@@ -121,11 +136,11 @@ async function updateBetResults() {
 
 // Process a single horse bet
 async function processSingleBet(bet) {
-  // Fetch race results for the bet's date and track
-  const results = await fetchRaceResults(bet.race_date, bet.track_name);
+  // Get the results for this track from today's cache
+  const results = findTrackResults(bet.track_name);
   
   if (!results || !results.length) {
-    console.log(`No results found for ${bet.track_name} on ${bet.race_date}`);
+    console.log(`No results found for ${bet.track_name} today`);
     return;
   }
   
@@ -133,7 +148,7 @@ async function processSingleBet(bet) {
   const horseResult = findHorseInResults(results, bet.horse_name);
   
   if (!horseResult) {
-    console.log(`Horse ${bet.horse_name} not found in results for ${bet.track_name} on ${bet.race_date}`);
+    console.log(`Horse ${bet.horse_name} not found in results for ${bet.track_name}`);
     return;
   }
   
@@ -195,20 +210,28 @@ async function processMultipleBet(bet) {
   const selections = bet.horse_name.split('/').map(s => s.trim());
   console.log(`Processing multiple bet with ${selections.length} selections: ${selections.join(', ')}`);
   
-  // Fetch race results for all selections
-  const results = await fetchRaceResults(bet.race_date, bet.track_name);
-  
-  if (!results || !results.length) {
-    console.log(`No results found for ${bet.track_name} on ${bet.race_date}`);
-    return;
-  }
+  // Split track names if multiple tracks
+  const trackNames = bet.track_name.split('/').map(t => t.trim());
   
   // Find all horses in the results
   const horseResults = [];
-  for (const selection of selections) {
+  
+  for (let i = 0; i < selections.length; i++) {
+    const selection = selections[i];
+    // Get track name (use the corresponding track if available, otherwise use the first one)
+    const trackName = trackNames[i] || trackNames[0];
+    
+    // Get results for this track
+    const results = findTrackResults(trackName);
+    
+    if (!results || !results.length) {
+      console.log(`No results found for ${trackName} today`);
+      return;
+    }
+    
     const horseResult = findHorseInResults(results, selection);
     if (!horseResult) {
-      console.log(`Horse ${selection} not found in results for ${bet.track_name} on ${bet.race_date}`);
+      console.log(`Horse ${selection} not found in results for ${trackName}`);
       return; // Exit if any horse is not found
     }
     horseResults.push(horseResult);
@@ -285,102 +308,75 @@ async function processMultipleBet(bet) {
   console.log(`Successfully updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}, Positions: ${positionsFormatted}`);
 }
 
-// Calculate CLV for multiple bets
-function calculateCLVForMultiple(bet, combinedBSP) {
-  if (!combinedBSP || combinedBSP <= 0) {
-    return null;
-  }
-  
-  const betOdds = parseFloat(bet.odds);
-  
-  if (isNaN(betOdds)) {
-    return null;
-  }
-  
-  // CLV formula: (bet_odds / bsp_odds - 1) * 100
-  const clv = (betOdds / combinedBSP - 1) * 100;
-  return Math.round(clv * 100) / 100; // Round to 2 decimal places
-}
-
-// Calculate CLV Stake for multiple bets
-function calculateCLVStakeForMultiple(bet, combinedBSP) {
-  const clv = calculateCLVForMultiple(bet, combinedBSP);
-  
-  if (clv === null) {
-    return null;
-  }
-  
-  // CLV Stake = CLV * Stake / 100
-  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
-}
-
-// Fetch race results from Racing API
-async function fetchRaceResults(date, track) {
+// Fetch today's race results using the simpler API call
+async function fetchTodaysRaceResults() {
   try {
-    console.log(`Fetching results for ${track} on ${date}`);
+    console.log('Fetching today\'s race results...');
     
-    // Format date for API request
-    const formattedDate = standardizeDate(date);
+    const response = await racingApi.get('/results/today');
     
-    // Get racecards for the date range
-    const cardsResponse = await racingApi.get('/racecards', {
-      params: { 
-        start_date: formattedDate,
-        end_date: formattedDate
-      }
-    });
-    
-    if (!cardsResponse.data || !cardsResponse.data.data) {
-      console.log(`No race cards found for ${formattedDate}`);
-      return null;
+    if (!response.data || !response.data.data || !response.data.data.results) {
+      console.log('No race results found for today');
+      return [];
     }
     
-    // Find the specific track
-    const trackCard = cardsResponse.data.data.find(card => 
-      card.meeting && card.meeting.name && 
-      card.meeting.name.toLowerCase() === track.toLowerCase()
-    );
+    console.log(`Successfully retrieved results for ${response.data.data.results.length} races`);
     
-    if (!trackCard) {
-      console.log(`No card found for ${track} on ${formattedDate}`);
-      return null;
-    }
+    // Process and format the results
+    const formattedRaces = [];
     
-    // Get detailed race results
-    const races = [];
-    
-    for (const race of trackCard.races) {
-      try {
-        const raceResponse = await racingApi.get(`/race/${race.id}/result`);
+    for (const meeting of response.data.data.results) {
+      const track = meeting.meeting_name || meeting.course;
+      
+      // Process each race at this track
+      for (const race of meeting.races) {
+        // Get runners
+        const runners = race.runners || [];
         
-        if (raceResponse.data && raceResponse.data.data) {
-          // Get total number of runners
-          const totalRunners = raceResponse.data.data.runners ? raceResponse.data.data.runners.length : 0;
-          
-          races.push({
-            race_id: race.id,
-            race_name: race.name,
-            time: race.time,
-            total_runners: totalRunners,
-            results: raceResponse.data.data.runners.map(runner => ({
-              horse_name: runner.horse || runner.name,
-              position: runner.position,
-              bsp: runner.bsp || null,
-              sp: runner.sp_dec || runner.sp || null,
-              total_runners: totalRunners
-            }))
-          });
-        }
-      } catch (raceError) {
-        console.error(`Error fetching results for race ${race.id}:`, raceError.message);
+        formattedRaces.push({
+          track_name: track,
+          race_id: race.race_id || race.id,
+          race_name: race.race_name || race.name,
+          time: race.time,
+          total_runners: runners.length,
+          results: runners.map(runner => ({
+            horse_name: runner.horse || runner.name,
+            position: runner.position,
+            bsp: runner.bsp || null,
+            sp: runner.sp_dec || runner.sp || null,
+            total_runners: runners.length
+          }))
+        });
       }
     }
     
-    return races;
+    return formattedRaces;
   } catch (error) {
-    console.error(`Error fetching race results:`, error.message);
+    console.error('Error fetching today\'s race results:', error.message);
+    if (error.response) {
+      console.error('API Response Status:', error.response.status);
+      console.error('API Response Data:', JSON.stringify(error.response.data));
+    }
+    return [];
+  }
+}
+
+// Find race results for a specific track
+function findTrackResults(trackName) {
+  if (!todaysRaceResults || !todaysRaceResults.length) {
     return null;
   }
+  
+  // Clean the track name for comparison
+  const cleanedTrackName = trackName.toLowerCase().trim();
+  
+  // Find all races for this track
+  return todaysRaceResults.filter(race => {
+    const raceTrackName = (race.track_name || '').toLowerCase().trim();
+    return raceTrackName === cleanedTrackName || 
+           raceTrackName.includes(cleanedTrackName) || 
+           cleanedTrackName.includes(raceTrackName);
+  });
 }
 
 // Find a horse in race results
@@ -420,6 +416,35 @@ function findHorseInResults(races, horseName) {
   
   console.log(`No match found for horse: ${horseName}`);
   return null;
+}
+
+// Calculate CLV for multiple bets
+function calculateCLVForMultiple(bet, combinedBSP) {
+  if (!combinedBSP || combinedBSP <= 0) {
+    return null;
+  }
+  
+  const betOdds = parseFloat(bet.odds);
+  
+  if (isNaN(betOdds)) {
+    return null;
+  }
+  
+  // CLV formula: (bet_odds / bsp_odds - 1) * 100
+  const clv = (betOdds / combinedBSP - 1) * 100;
+  return Math.round(clv * 100) / 100; // Round to 2 decimal places
+}
+
+// Calculate CLV Stake for multiple bets
+function calculateCLVStakeForMultiple(bet, combinedBSP) {
+  const clv = calculateCLVForMultiple(bet, combinedBSP);
+  
+  if (clv === null) {
+    return null;
+  }
+  
+  // CLV Stake = CLV * Stake / 100
+  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
 }
 
 // Determine bet result (win, place, loss) based on number of runners
