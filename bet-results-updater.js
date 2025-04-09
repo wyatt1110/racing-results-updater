@@ -84,22 +84,36 @@ async function updateBetResults() {
     // Debug: Log the first bet to see field structure
     console.log(`Sample pending bet: ${JSON.stringify(pendingBets[0], null, 2)}`);
     
-    // Fetch today's race results once and organize them for quick lookup
-    const racingData = await fetchTodaysRaceResults();
+    // Now instead of trying to extract races from the API directly, let's first fetch individual
+    // race results for each pending bet - this guarantees we get the data we need
+    const pendingBetTracks = [...new Set(pendingBets.map(bet => {
+      // Handle multiple bets with track names separated by slashes
+      if (bet.track_name && bet.track_name.includes('/')) {
+        return bet.track_name.split('/').map(t => t.trim());
+      }
+      return bet.track_name;
+    }).flat().filter(Boolean))];
     
-    // If we couldn't get any race data, exit early
-    if (!racingData || racingData.length === 0) {
-      console.log('No race results found for today, nothing to update');
+    console.log(`Unique tracks to query: ${pendingBetTracks.join(', ')}`);
+    
+    // Fetch race results for each track
+    const horsesData = await fetchRaceResultsByTracks(pendingBetTracks);
+    
+    if (Object.keys(horsesData.horses).length === 0) {
+      console.log('No horse data found for any track, nothing to update');
       return { success: true, updated: 0, total: pendingBets.length };
     }
     
-    console.log(`Successfully retrieved data for ${racingData.length} horses`);
+    console.log(`Retrieved data for ${Object.keys(horsesData.horses).length} horses at ${Object.keys(horsesData.tracks).length} tracks`);
     
     // Process each pending bet
     let updatedCount = 0;
     let foundMatchCount = 0;
     let noMatchCount = 0;
     let errorCount = 0;
+    
+    // Log which tracks we have data for
+    console.log(`Available tracks in results: ${Object.keys(horsesData.tracks).sort().join(', ')}`);
     
     for (const bet of pendingBets) {
       try {
@@ -108,7 +122,7 @@ async function updateBetResults() {
         
         // Check if this is a multiple bet (contains '/' in horse_name)
         if (bet.horse_name && bet.horse_name.includes('/')) {
-          const matchFound = await processMultipleBet(bet, racingData);
+          const matchFound = await processMultipleBet(bet, horsesData);
           if (matchFound) {
             updatedCount++;
             foundMatchCount++;
@@ -116,7 +130,7 @@ async function updateBetResults() {
             noMatchCount++;
           }
         } else {
-          const matchFound = await processSingleBet(bet, racingData);
+          const matchFound = await processSingleBet(bet, horsesData);
           if (matchFound) {
             updatedCount++;
             foundMatchCount++;
@@ -151,12 +165,12 @@ async function updateBetResults() {
   }
 }
 
-// Fetch today's race results and flatten into searchable format
-async function fetchTodaysRaceResults() {
+// Fetch race results by tracks
+async function fetchRaceResultsByTracks(trackNames) {
   try {
-    console.log('Fetching today\'s race results...');
+    console.log('Fetching all race results...');
     
-    // Make the API call
+    // Make the API call to get all results for today
     const response = await racingApi.get('/results/today');
     
     // Save the raw response for debugging
@@ -167,111 +181,184 @@ async function fetchTodaysRaceResults() {
       console.log('Could not save response to file:', writeError.message);
     }
     
-    // Check if we have the expected response structure
-    if (!response.data) {
-      console.log('Invalid API response: no data received');
-      return [];
+    // Initialize data structure to hold processed results
+    const processedData = {
+      tracks: {},
+      horses: {}
+    };
+    
+    // Check if we have valid data
+    if (!response.data || !response.data.results || !Array.isArray(response.data.results)) {
+      console.log('Invalid API response format: missing results array');
+      console.log('Response structure:', JSON.stringify(Object.keys(response.data || {})));
+      return processedData;
     }
     
-    // Directly access all results (flatten the structure)
-    const allHorseResults = [];
+    console.log(`API returned ${response.data.results.length} items in results array`);
     
-    // First log the structure we're dealing with
-    console.log('API response structure:');
-    console.log('Response has these top level keys:', Object.keys(response.data));
-    
-    if (response.data.results && Array.isArray(response.data.results)) {
-      console.log(`Found ${response.data.results.length} items in results array`);
-    } else {
-      console.log('No results array found or it is not an array');
-      return [];
+    // Save a sample meeting structure for debugging
+    const sampleMeeting = response.data.results[0];
+    if (sampleMeeting) {
+      try {
+        fs.writeFileSync('sample_meeting.json', JSON.stringify(sampleMeeting, null, 2));
+        console.log('Saved sample meeting structure to sample_meeting.json');
+      } catch (writeError) {
+        console.log('Could not save sample meeting to file:', writeError.message);
+      }
     }
     
-    // Process in a way that works regardless of exact structure
-    for (const item of response.data.results) {
-      // Try to extract races and course info
-      const trackName = item.meeting_name || item.course || '';
-      console.log(`Processing results for track: ${trackName}`);
+    // Deep function to recursively find all runners in the API response
+    function findAllRunners(obj, parentPath = '', trackName = null) {
+      // Base case: if not an object or array, return
+      if (!obj || typeof obj !== 'object') return;
       
-      let races = [];
-      
-      // Extract races from wherever they might be in the structure
-      if (item.races && Array.isArray(item.races)) {
-        races = item.races;
-      } else if (item.data && item.data.races && Array.isArray(item.data.races)) {
-        races = item.data.races;
+      // If this is an array, iterate through each item
+      if (Array.isArray(obj)) {
+        obj.forEach((item, index) => {
+          findAllRunners(item, `${parentPath}[${index}]`, trackName);
+        });
+        return;
       }
       
-      if (races.length === 0) {
-        console.log(`No races found for ${trackName}`);
-        continue;
+      // Check if this might be a track/meeting object
+      if (obj.meeting_name || obj.course) {
+        trackName = obj.meeting_name || obj.course;
+        console.log(`Found potential track: ${trackName} at ${parentPath}`);
       }
       
-      console.log(`Found ${races.length} races at ${trackName}`);
-      
-      // Process each race at this track
-      for (const race of races) {
-        const raceId = race.race_id || race.id || '';
-        const raceTime = race.time || '';
-        const raceName = race.race_name || race.name || '';
-        
-        // Extract runners from wherever they might be
-        let runners = [];
-        if (race.runners && Array.isArray(race.runners)) {
-          runners = race.runners;
-        } else if (race.results && Array.isArray(race.results)) {
-          runners = race.results;
-        }
-        
-        if (runners.length === 0) {
-          console.log(`No runners found for race at ${raceTime}`);
-          continue;
-        }
-        
-        // Create complete info for each horse including race and track details
-        for (const runner of runners) {
-          const horseName = runner.horse || runner.name || '';
-          if (!horseName) continue;
+      // Check if this might be a runner object
+      if (obj.horse || obj.name) {
+        const horseName = obj.horse || obj.name;
+        if (horseName && obj.position) {
+          console.log(`Found runner: ${horseName}, position: ${obj.position} at ${parentPath}`);
           
-          allHorseResults.push({
-            horse_name: horseName,
-            position: runner.position || '',
-            bsp: runner.bsp || null,
-            sp: runner.sp_dec || runner.sp || null,
-            track_name: trackName,
-            race_id: raceId,
-            race_time: raceTime,
-            race_name: raceName,
-            total_runners: runners.length
-          });
+          // Try to determine the race this belongs to
+          let raceObj = null;
+          let trackObj = null;
+          
+          // Go up the parent chain to find race and track
+          const pathParts = parentPath.split('.');
+          
+          // Work backwards from current path to find parent race and track
+          let currentObj = response.data;
+          for (let i = 0; i < pathParts.length - 1; i++) {
+            const part = pathParts[i];
+            const match = part.match(/\[(\d+)\]/);
+            if (match) {
+              const index = parseInt(match[1]);
+              currentObj = currentObj[index];
+            } else {
+              currentObj = currentObj[part];
+            }
+            
+            // Check if this might be a race
+            if (currentObj && (currentObj.race_id || currentObj.race_name || currentObj.time)) {
+              raceObj = currentObj;
+            }
+            
+            // Check if this might be a track
+            if (currentObj && (currentObj.meeting_name || currentObj.course)) {
+              trackObj = currentObj;
+            }
+          }
+          
+          const track = trackName || (trackObj ? (trackObj.meeting_name || trackObj.course) : 'unknown');
+          const cleanTrack = cleanHorseName(track);
+          
+          // Only process if we're interested in this track
+          if (trackNames.some(t => {
+            const cleanT = cleanHorseName(t);
+            return cleanT === cleanTrack || 
+                   cleanT.includes(cleanTrack) || 
+                   cleanTrack.includes(cleanT);
+          })) {
+            // Initialize track if not exists
+            if (!processedData.tracks[cleanTrack]) {
+              processedData.tracks[cleanTrack] = {
+                name: track,
+                races: {}
+              };
+            }
+            
+            // Determine race details
+            const raceId = raceObj ? (raceObj.race_id || raceObj.id || '') : '';
+            const raceTime = raceObj ? (raceObj.time || '') : '';
+            const raceName = raceObj ? (raceObj.race_name || raceObj.name || '') : '';
+            
+            // Initialize race if not exists
+            if (raceId && !processedData.tracks[cleanTrack].races[raceId]) {
+              processedData.tracks[cleanTrack].races[raceId] = {
+                id: raceId,
+                time: raceTime,
+                name: raceName,
+                runners: []
+              };
+            }
+            
+            // Add horse to race if we have valid race info
+            if (raceId) {
+              const horseData = {
+                name: horseName,
+                position: obj.position || '',
+                bsp: obj.bsp || null,
+                sp: obj.sp_dec || obj.sp || null
+              };
+              
+              processedData.tracks[cleanTrack].races[raceId].runners.push(horseData);
+              
+              // Also add to flat horses lookup for easier access
+              const cleanHorse = cleanHorseName(horseName);
+              processedData.horses[cleanHorse] = {
+                ...horseData,
+                track_name: track,
+                race_id: raceId,
+                race_time: raceTime,
+                race_name: raceName
+              };
+            }
+          }
         }
+      }
+      
+      // Recursively process all properties
+      for (const key in obj) {
+        findAllRunners(obj[key], parentPath ? `${parentPath}.${key}` : key, trackName);
       }
     }
     
-    // Log the total number of horses processed
-    console.log(`Processed a total of ${allHorseResults.length} horse results`);
+    // Start the recursive search from the results array
+    findAllRunners(response.data.results, 'results');
     
-    // Save processed data for debugging
+    // Log what we found
+    console.log(`Extracted data for ${Object.keys(processedData.tracks).length} tracks`);
+    for (const [trackName, trackData] of Object.entries(processedData.tracks)) {
+      console.log(`- ${trackData.name}: ${Object.keys(trackData.races).length} races`);
+      for (const [raceId, raceData] of Object.entries(trackData.races)) {
+        console.log(`  - Race at ${raceData.time}: ${raceData.runners.length} runners`);
+      }
+    }
+    
+    // Save the processed data
     try {
-      fs.writeFileSync('processed_horses.json', JSON.stringify(allHorseResults, null, 2));
-      console.log('Saved processed horse data to processed_horses.json');
+      fs.writeFileSync('processed_races.json', JSON.stringify(processedData, null, 2));
+      console.log('Saved processed race data to processed_races.json');
     } catch (writeError) {
       console.log('Could not save processed data to file:', writeError.message);
     }
     
-    return allHorseResults;
+    return processedData;
   } catch (error) {
-    console.error('Error fetching today\'s race results:', error.message);
+    console.error('Error fetching race results:', error.message);
     if (error.response) {
       console.error('API Response Status:', error.response.status);
-      console.error('API Response Data:', JSON.stringify(error.response.data || {}).substring(0, 200) + '...');
+      console.error('API Response Data excerpt:', JSON.stringify(error.response.data || {}).substring(0, 200) + '...');
     }
-    return [];
+    return { tracks: {}, horses: {} };
   }
 }
 
 // Find a horse in the results data
-function findHorseInResults(allHorses, horseName, trackName) {
+function findHorseInResults(horsesData, horseName, trackName) {
   if (!horseName) return null;
   
   const cleanTrack = cleanHorseName(trackName || '');
@@ -279,71 +366,83 @@ function findHorseInResults(allHorses, horseName, trackName) {
   
   console.log(`Looking for horse: "${cleanHorse}" at track: "${cleanTrack}"`);
   
-  // First try exact match with track and horse name
-  const exactMatch = allHorses.find(horse => 
-    cleanHorseName(horse.horse_name) === cleanHorse && 
-    (!cleanTrack || cleanHorseName(horse.track_name).includes(cleanTrack) || cleanTrack.includes(cleanHorseName(horse.track_name)))
-  );
-  
-  if (exactMatch) {
-    console.log(`MATCH FOUND: Exact match for "${horseName}" at ${exactMatch.track_name}, position: ${exactMatch.position}`);
-    return exactMatch;
-  }
-  
-  // Try partial match with track and horse name
-  const partialMatch = allHorses.find(horse => {
-    const horseNameClean = cleanHorseName(horse.horse_name);
-    const trackNameClean = cleanHorseName(horse.track_name);
-    
-    return (horseNameClean.includes(cleanHorse) || cleanHorse.includes(horseNameClean)) && 
-           (!cleanTrack || trackNameClean.includes(cleanTrack) || cleanTrack.includes(trackNameClean));
-  });
-  
-  if (partialMatch) {
-    console.log(`MATCH FOUND: Partial match for "${horseName}" -> "${partialMatch.horse_name}" at ${partialMatch.track_name}, position: ${partialMatch.position}`);
-    return partialMatch;
-  }
-  
-  // If we have a track but couldn't find with it, try just by horse name as fallback
-  if (cleanTrack) {
-    const horseOnlyMatch = allHorses.find(horse => {
-      const horseNameClean = cleanHorseName(horse.horse_name);
-      return horseNameClean === cleanHorse || horseNameClean.includes(cleanHorse) || cleanHorse.includes(horseNameClean);
-    });
-    
-    if (horseOnlyMatch) {
-      console.log(`MATCH FOUND: Horse-only match for "${horseName}" at ${horseOnlyMatch.track_name} (not ${trackName}), position: ${horseOnlyMatch.position}`);
-      return horseOnlyMatch;
+  // First check if we have an exact match in our horses object
+  if (horsesData.horses[cleanHorse]) {
+    const horse = horsesData.horses[cleanHorse];
+    // Verify track matches if specified
+    if (!cleanTrack || 
+        cleanHorseName(horse.track_name) === cleanTrack || 
+        cleanHorseName(horse.track_name).includes(cleanTrack) || 
+        cleanTrack.includes(cleanHorseName(horse.track_name))) {
+      console.log(`MATCH FOUND: Exact match for "${horseName}" at ${horse.track_name}, position: ${horse.position}`);
+      return horse;
     }
   }
   
-  // Log the track names we have in the data to help with debugging
-  const uniqueTracks = [...new Set(allHorses.map(h => h.track_name))];
-  console.log(`Available tracks in results: ${uniqueTracks.join(', ')}`);
+  // Check for partial horse name matches
+  for (const [horseKey, horse] of Object.entries(horsesData.horses)) {
+    if (horseKey.includes(cleanHorse) || cleanHorse.includes(horseKey)) {
+      // Verify track matches if specified
+      if (!cleanTrack || 
+          cleanHorseName(horse.track_name) === cleanTrack || 
+          cleanHorseName(horse.track_name).includes(cleanTrack) || 
+          cleanTrack.includes(cleanHorseName(horse.track_name))) {
+        console.log(`MATCH FOUND: Partial match for "${horseName}" -> "${horse.name}" at ${horse.track_name}, position: ${horse.position}`);
+        return horse;
+      }
+    }
+  }
   
-  // If track matches but no horse match, show all horses at that track
+  // If we have a track specified, look at all runners in races at that track
   if (cleanTrack) {
-    const horsesAtTrack = allHorses.filter(horse => {
-      const trackNameClean = cleanHorseName(horse.track_name);
-      return trackNameClean.includes(cleanTrack) || cleanTrack.includes(trackNameClean);
-    });
+    // Find matching track
+    const matchingTrack = Object.keys(horsesData.tracks).find(trackKey => 
+      trackKey === cleanTrack || 
+      trackKey.includes(cleanTrack) || 
+      cleanTrack.includes(trackKey)
+    );
     
-    if (horsesAtTrack.length > 0) {
-      console.log(`Horses at ${trackName}:`);
-      horsesAtTrack.forEach(h => {
-        console.log(`- ${h.horse_name} (position: ${h.position})`);
-      });
+    if (matchingTrack) {
+      console.log(`Looking for ${horseName} in all races at ${horsesData.tracks[matchingTrack].name}`);
+      
+      // Check all races at this track
+      for (const [raceId, race] of Object.entries(horsesData.tracks[matchingTrack].races)) {
+        // Check all runners in this race
+        for (const runner of race.runners) {
+          const runnerName = cleanHorseName(runner.name);
+          if (runnerName === cleanHorse || runnerName.includes(cleanHorse) || cleanHorse.includes(runnerName)) {
+            console.log(`MATCH FOUND: ${runner.name} at ${horsesData.tracks[matchingTrack].name} in race at ${race.time}, position: ${runner.position}`);
+            return {
+              ...runner,
+              track_name: horsesData.tracks[matchingTrack].name,
+              race_id: raceId,
+              race_time: race.time,
+              race_name: race.name
+            };
+          }
+        }
+      }
+      
+      // If we got here, list all horses at this track for debugging
+      console.log(`No match found. All runners at ${horsesData.tracks[matchingTrack].name}:`);
+      for (const [raceId, race] of Object.entries(horsesData.tracks[matchingTrack].races)) {
+        console.log(`- Race at ${race.time}:`);
+        race.runners.forEach(runner => {
+          console.log(`  - ${runner.name} (position: ${runner.position})`);
+        });
+      }
     } else {
-      console.log(`No horses found at track: ${trackName}`);
+      console.log(`No matching track found for "${trackName}"`);
+      console.log(`Available tracks: ${Object.keys(horsesData.tracks).map(k => horsesData.tracks[k].name).join(', ')}`);
     }
   }
   
-  console.log(`NO MATCH: Horse "${horseName}" not found at track "${trackName}" or any similar track`);
+  console.log(`NO MATCH: Horse "${horseName}" not found at track "${trackName}"`);
   return null;
 }
 
 // Process a single horse bet
-async function processSingleBet(bet, allHorses) {
+async function processSingleBet(bet, horsesData) {
   // Skip if missing essential data
   if (!bet.horse_name) {
     console.log(`Skipping bet ID ${bet.id} - missing horse name`);
@@ -351,7 +450,7 @@ async function processSingleBet(bet, allHorses) {
   }
   
   // Find the horse in the results
-  const horseResult = findHorseInResults(allHorses, bet.horse_name, bet.track_name);
+  const horseResult = findHorseInResults(horsesData, bet.horse_name, bet.track_name);
   
   if (!horseResult) {
     console.log(`No match found for bet ID ${bet.id}`);
@@ -359,8 +458,25 @@ async function processSingleBet(bet, allHorses) {
   }
   
   // Get number of runners in the race
-  const numRunners = parseInt(horseResult.total_runners) || 0;
-  console.log(`Race has ${numRunners} runners`);
+  let numRunners = 0;
+  
+  // Find the race to get total runners
+  if (horseResult.race_id && horsesData.tracks) {
+    const trackKey = Object.keys(horsesData.tracks).find(tk => 
+      cleanHorseName(horsesData.tracks[tk].name) === cleanHorseName(horseResult.track_name)
+    );
+    
+    if (trackKey && horsesData.tracks[trackKey].races[horseResult.race_id]) {
+      numRunners = horsesData.tracks[trackKey].races[horseResult.race_id].runners.length;
+    }
+  }
+  
+  if (!numRunners) {
+    numRunners = 10; // Default if we can't determine
+    console.log(`Couldn't determine runner count, using default: ${numRunners}`);
+  } else {
+    console.log(`Race has ${numRunners} runners`);
+  }
   
   // Determine if this is an each-way bet
   const isEachWay = bet.each_way === true;
@@ -412,7 +528,7 @@ async function processSingleBet(bet, allHorses) {
 }
 
 // Process a multiple bet (horses separated by '/')
-async function processMultipleBet(bet, allHorses) {
+async function processMultipleBet(bet, horsesData) {
   // Split selection by '/'
   const selections = bet.horse_name.split('/').map(s => s.trim());
   console.log(`Processing multiple bet with ${selections.length} selections: ${selections.join(', ')}`);
@@ -428,7 +544,7 @@ async function processMultipleBet(bet, allHorses) {
     // Get track name (use the corresponding track if available, otherwise use the first one)
     const trackName = trackNames[i] || trackNames[0] || '';
     
-    const horseResult = findHorseInResults(allHorses, selection, trackName);
+    const horseResult = findHorseInResults(horsesData, selection, trackName);
     if (!horseResult) {
       console.log(`No results found for ${selection} at ${trackName || 'any track'}`);
       return false; // Exit if any horse is not found
