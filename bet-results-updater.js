@@ -49,11 +49,24 @@ async function updateBetResults() {
   console.log(`Using Supabase URL: ${supabaseUrl.substring(0, 20)}...`);
   
   try {
-    // Try with multiple status values to find pending bets
+    // First, let's check all status values to debug
+    const { data: statusCheck, error: statusError } = await supabase
+      .from('racing_bets')
+      .select('status')
+      .limit(50);
+    
+    if (statusError) {
+      console.log(`Error checking status values: ${statusError.message}`);
+    } else {
+      const uniqueStatuses = [...new Set(statusCheck.map(b => b.status))];
+      console.log(`Found these status values in the database: ${JSON.stringify(uniqueStatuses)}`);
+    }
+    
+    // Fetch pending bets using case-insensitive matching for greater flexibility
     let { data: pendingBets, error: betsError } = await supabase
       .from('racing_bets')
       .select('*')
-      .or('status.eq.pending,status.eq.open,status.is.null');
+      .or('status.ilike.%pending%,status.ilike.%open%,status.eq.new,status.eq.,status.eq.PENDING,status.eq.Pending');
     
     if (betsError) {
       throw new Error(`Error fetching pending bets: ${betsError.message}`);
@@ -62,6 +75,16 @@ async function updateBetResults() {
     console.log(`Found ${pendingBets ? pendingBets.length : 0} pending bets to process`);
     
     if (!pendingBets || pendingBets.length === 0) {
+      // If we didn't find anything, try a broader query as a fallback
+      const { data: allBets, error: allError } = await supabase
+        .from('racing_bets')
+        .select('id, status, horse_name, race_date')
+        .limit(10);
+      
+      if (!allError && allBets && allBets.length > 0) {
+        console.log(`Found some bets with these details (sample): ${JSON.stringify(allBets.slice(0, 3))}`);
+      }
+      
       console.log('No pending bets found to update.');
       return { success: true, updated: 0, total: 0 };
     }
