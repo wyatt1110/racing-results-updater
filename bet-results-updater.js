@@ -24,11 +24,18 @@ const racingApi = axios.create({
 // Sleep function for delay between API calls
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Track codes map (hardcoded for simplicity)
-const TRACK_CODES = require('../Track-codes-list.json').courses.reduce((acc, track) => {
-  acc[track.course.toLowerCase()] = track.id;
-  return acc;
-}, {});
+// Track codes map (hardcoded for the tracks we need)
+const TRACK_CODES = {
+  'catterick': 'crs_260',
+  'nottingham': 'crs_1040',
+  'leopardstown': 'crs_4862',
+  'leopardstown (ire)': 'crs_4862',
+  'kempton': 'crs_28054',
+  'kempton (aw)': 'crs_28054',
+  'taunton': 'crs_1898',
+  'happy valley': 'crs_10296',
+  'happy valley (hk)': 'crs_10296'
+};
 
 // Main function to update bet results
 async function updateBetResults() {
