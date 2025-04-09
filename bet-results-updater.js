@@ -61,51 +61,13 @@ async function updateBetResults() {
       try {
         console.log(`Processing bet ID: ${bet.id} for horse: ${bet.selection}`);
         
-        // Fetch race results for the bet's date and track
-        const results = await fetchRaceResults(bet.date, bet.track);
-        
-        if (!results || !results.length) {
-          console.log(`No results found for ${bet.track} on ${bet.date}`);
-          continue;
+        // Check if this is a multiple bet (contains '/' in selection)
+        if (bet.selection.includes('/')) {
+          await processMultipleBet(bet);
+        } else {
+          await processSingleBet(bet);
         }
         
-        // Find the horse in the results
-        const horseResult = findHorseInResults(results, bet.selection);
-        
-        if (!horseResult) {
-          console.log(`Horse ${bet.selection} not found in results for ${bet.track} on ${bet.date}`);
-          continue;
-        }
-        
-        // Get number of runners in the race
-        const numRunners = horseResult.total_runners || 0;
-        console.log(`Race has ${numRunners} runners`);
-        
-        // Determine bet result (win, place, loss)
-        const betResult = determineBetResult(horseResult, bet.bet_type, numRunners);
-        
-        // Calculate bet returns based on result
-        const returns = calculateReturns(bet, betResult, horseResult, numRunners);
-        
-        // Update the bet in Supabase
-        const { error: updateError } = await supabase
-          .from('bets')
-          .update({
-            result: betResult,
-            returns: returns,
-            bsp: horseResult.bsp || null,
-            clv: calculateCLV(bet, horseResult),
-            clv_stake: calculateCLVStake(bet, horseResult),
-            finishing_position: horseResult.position || null,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', bet.id);
-        
-        if (updateError) {
-          throw new Error(`Error updating bet ID ${bet.id}: ${updateError.message}`);
-        }
-        
-        console.log(`Successfully updated bet ID: ${bet.id}, Result: ${betResult}, Returns: ${returns}`);
         updatedCount++;
         
       } catch (betError) {
@@ -120,6 +82,166 @@ async function updateBetResults() {
     console.error('Error in updateBetResults:', error);
     return { success: false, error: error.message };
   }
+}
+
+// Process a single horse bet
+async function processSingleBet(bet) {
+  // Fetch race results for the bet's date and track
+  const results = await fetchRaceResults(bet.date, bet.track);
+  
+  if (!results || !results.length) {
+    console.log(`No results found for ${bet.track} on ${bet.date}`);
+    return;
+  }
+  
+  // Find the horse in the results
+  const horseResult = findHorseInResults(results, bet.selection);
+  
+  if (!horseResult) {
+    console.log(`Horse ${bet.selection} not found in results for ${bet.track} on ${bet.date}`);
+    return;
+  }
+  
+  // Get number of runners in the race
+  const numRunners = horseResult.total_runners || 0;
+  console.log(`Race has ${numRunners} runners`);
+  
+  // Determine bet result (win, place, loss)
+  const betResult = determineBetResult(horseResult, bet.bet_type, numRunners);
+  
+  // Calculate bet returns based on result
+  const returns = calculateReturns(bet, betResult, horseResult, numRunners);
+  
+  // Update the bet in Supabase
+  const { error: updateError } = await supabase
+    .from('bets')
+    .update({
+      result: betResult,
+      returns: returns,
+      bsp: horseResult.bsp || null,
+      clv: calculateCLV(bet, horseResult),
+      clv_stake: calculateCLVStake(bet, horseResult),
+      finishing_position: horseResult.position || null,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', bet.id);
+  
+  if (updateError) {
+    throw new Error(`Error updating bet ID ${bet.id}: ${updateError.message}`);
+  }
+  
+  console.log(`Successfully updated bet ID: ${bet.id}, Result: ${betResult}, Returns: ${returns}`);
+}
+
+// Process a multiple bet (horses separated by '/')
+async function processMultipleBet(bet) {
+  // Split selection by '/'
+  const selections = bet.selection.split('/').map(s => s.trim());
+  console.log(`Processing multiple bet with ${selections.length} selections: ${selections.join(', ')}`);
+  
+  // Fetch race results for all selections
+  const results = await fetchRaceResults(bet.date, bet.track);
+  
+  if (!results || !results.length) {
+    console.log(`No results found for ${bet.track} on ${bet.date}`);
+    return;
+  }
+  
+  // Find all horses in the results
+  const horseResults = [];
+  for (const selection of selections) {
+    const horseResult = findHorseInResults(results, selection);
+    if (!horseResult) {
+      console.log(`Horse ${selection} not found in results for ${bet.track} on ${bet.date}`);
+      return; // Exit if any horse is not found
+    }
+    horseResults.push(horseResult);
+  }
+  
+  console.log(`Found all ${selections.length} horses in the multiple bet`);
+  
+  // Check if all horses won (for win bets)
+  const allWon = horseResults.every(hr => parseInt(hr.position) === 1);
+  
+  // Format positions for finishing_position field
+  const positionsFormatted = horseResults.map(hr => hr.position).join(' / ');
+  
+  // Calculate combined BSP (multiply all BSPs together)
+  let combinedBSP = 1;
+  let allHaveBSP = true;
+  
+  for (const hr of horseResults) {
+    if (!hr.bsp || hr.bsp <= 0) {
+      allHaveBSP = false;
+      break;
+    }
+    combinedBSP *= parseFloat(hr.bsp);
+  }
+  
+  if (!allHaveBSP) {
+    combinedBSP = null;
+  }
+  
+  // Determine bet result - for multiple bets, all selections must win
+  let betResult = 'loss';
+  if (bet.bet_type === 'win' && allWon) {
+    betResult = 'win';
+  }
+  
+  // Calculate returns
+  let returns = 0;
+  if (betResult === 'win') {
+    returns = bet.stake * bet.odds;
+  }
+  
+  // Update the bet in Supabase
+  const { error: updateError } = await supabase
+    .from('bets')
+    .update({
+      result: betResult,
+      returns: returns,
+      bsp: combinedBSP,
+      clv: allHaveBSP ? calculateCLVForMultiple(bet, combinedBSP) : null,
+      clv_stake: allHaveBSP ? calculateCLVStakeForMultiple(bet, combinedBSP) : null,
+      finishing_position: positionsFormatted,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', bet.id);
+  
+  if (updateError) {
+    throw new Error(`Error updating multiple bet ID ${bet.id}: ${updateError.message}`);
+  }
+  
+  console.log(`Successfully updated multiple bet ID: ${bet.id}, Result: ${betResult}, Returns: ${returns}, Positions: ${positionsFormatted}`);
+}
+
+// Calculate CLV for multiple bets
+function calculateCLVForMultiple(bet, combinedBSP) {
+  if (!combinedBSP || combinedBSP <= 0) {
+    return null;
+  }
+  
+  const betOdds = parseFloat(bet.odds);
+  
+  if (isNaN(betOdds)) {
+    return null;
+  }
+  
+  // CLV formula: (bet_odds / bsp_odds - 1) * 100
+  const clv = (betOdds / combinedBSP - 1) * 100;
+  return Math.round(clv * 100) / 100; // Round to 2 decimal places
+}
+
+// Calculate CLV Stake for multiple bets
+function calculateCLVStakeForMultiple(bet, combinedBSP) {
+  const clv = calculateCLVForMultiple(bet, combinedBSP);
+  
+  if (clv === null) {
+    return null;
+  }
+  
+  // CLV Stake = CLV * Stake / 100
+  return Math.round((clv * bet.stake / 100) * 100) / 100; // Round to 2 decimal places
 }
 
 // Fetch race results from Racing API
