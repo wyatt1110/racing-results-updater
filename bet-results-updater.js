@@ -15,7 +15,10 @@ const racingApiBase = 'https://api.theracingapi.com/v1';
 const supabase = createClient(supabaseUrl, supabaseKey);
 const racingApi = axios.create({
   baseURL: racingApiBase,
-  auth: { username: racingApiUsername, password: racingApiPassword }
+  auth: {
+    username: racingApiUsername,
+    password: racingApiPassword
+  }
 });
 
 // Sleep function for delay between API calls
@@ -33,22 +36,8 @@ const TRACK_CODES = {
 // Main function to update bet results
 async function updateBetResults() {
   console.log('Starting bet results update process...');
-  console.log(`Using Supabase URL: ${supabaseUrl.substring(0, 20)}...`);
   
   try {
-    // Check status values for debugging
-    const { data: statusCheck, error: statusError } = await supabase
-      .from('racing_bets')
-      .select('status')
-      .limit(50);
-    
-    if (statusError) {
-      console.log(`Error checking status values: ${statusError.message}`);
-    } else {
-      const uniqueStatuses = [...new Set(statusCheck.map(b => b.status))];
-      console.log(`Found these status values in the database: ${JSON.stringify(uniqueStatuses)}`);
-    }
-    
     // Fetch pending bets
     let { data: pendingBets, error: betsError } = await supabase
       .from('racing_bets')
@@ -66,7 +55,7 @@ async function updateBetResults() {
       return { success: true, updated: 0, total: 0 };
     }
     
-    // Log a sample bet
+    // Sample pending bet for debugging (only log one)
     console.log(`Sample pending bet: ${JSON.stringify(pendingBets[0], null, 2)}`);
     
     // Group bets by track and date
@@ -97,20 +86,8 @@ async function updateBetResults() {
           console.log(`No course ID found for ${track}, will use track name only`);
         }
         
-        // Fetch results for this track and date using results endpoint
-        let horses = await fetchTrackResults(track, courseId, date, '/results');
-        
-        // If no horses found, try the cards endpoint
-        if (horses.length === 0) {
-          console.log(`No horses found from results endpoint, trying cards endpoint...`);
-          horses = await fetchTrackResults(track, courseId, date, '/cards');
-        }
-        
-        // If still no horses, try the results/today endpoint for today's races
-        if (horses.length === 0 && date === new Date().toISOString().split('T')[0]) {
-          console.log(`No horses found from cards endpoint, trying results/today endpoint...`);
-          horses = await fetchTrackResults(track, courseId, date, '/results/today');
-        }
+        // Fetch results for this track and date
+        let horses = await fetchTrackResults(track, courseId, date);
         
         if (horses.length === 0) {
           console.log(`No horses found for ${track} on ${date}, skipping ${bets.length} bets`);
@@ -119,14 +96,6 @@ async function updateBetResults() {
         }
         
         console.log(`Found ${horses.length} horses for ${track} on ${date}`);
-        
-        // Log a few sample horses
-        if (horses.length > 0) {
-          console.log('Sample horses:');
-          horses.slice(0, 3).forEach(h => {
-            console.log(`- ${h.horse_name} (Position: ${h.position})`);
-          });
-        }
         
         // Process each bet for this track/date
         for (const bet of bets) {
@@ -150,8 +119,8 @@ async function updateBetResults() {
         
         // Wait before next API call
         if (Object.keys(trackDateGroups).length > 1) {
-          console.log('Waiting 15 seconds before next API call...');
-          await sleep(15000);
+          console.log('Waiting 5 seconds before next API call...');
+          await sleep(5000);
         }
       }
     }
@@ -223,71 +192,88 @@ function groupBetsByTrackAndDate(bets) {
 }
 
 // Fetch results for a specific track and date
-async function fetchTrackResults(trackName, courseId, date, endpoint = '/results') {
-  console.log(`Fetching results for track: ${trackName}, date: ${date}, endpoint: ${endpoint}`);
+async function fetchTrackResults(trackName, courseId, date) {
+  console.log(`Fetching results for track: ${trackName}, date: ${date}`);
   
   try {
     // Create filename-safe version of track name
     const safeTrackName = trackName.replace(/\s+/g, '_');
     
-    // Different API calls based on endpoint
-    let response;
-    if (endpoint === '/results') {
-      const options = {
-        start_date: date,
-        end_date: date
-      };
-      
-      // Only add course parameter if we have a course ID
-      if (courseId) {
-        options.course = courseId; // API expects just the ID string, not an array
-      } else {
-        // Without course ID, try region for UK races
-        options.region = 'gb';
-      }
-      
-      console.log(`API Request: ${endpoint} with params:`, options);
-      response = await racingApi.get(endpoint, { params: options });
-      
-    } else if (endpoint === '/cards') {
-      // Cards endpoint takes date as string parameter
-      console.log(`API Request: ${endpoint}?date=${date}`);
-      response = await racingApi.get(endpoint, { 
-        params: { date }
-      });
-      
-    } else if (endpoint === '/results/today') {
-      // Today's results endpoint takes no parameters
-      console.log(`API Request: ${endpoint}`);
-      response = await racingApi.get(endpoint);
+    // Pagination parameters
+    const limit = 50;
+    let skip = 0;
+    let totalHorses = [];
+    let totalFound = 0;
+    let hasMore = true;
+    
+    // First API call to get total and first page
+    const params = {
+      start_date: date,
+      end_date: date,
+      limit: limit,
+      skip: skip
+    };
+    
+    // Add course parameter if we have a course ID
+    if (courseId) {
+      params.course = courseId;
     }
     
-    // Save raw response for debugging
-    const outputFile = `${safeTrackName}_${date}_${endpoint.replace(/\//g, '_')}.json`;
+    console.log(`API Request: /results with params:`, params);
+    const response = await racingApi.get('/results', { params });
+    
+    // Save raw response for debugging only on first call
+    const outputFile = `${safeTrackName}_${date}_response.json`;
     fs.writeFileSync(outputFile, JSON.stringify(response.data, null, 2));
-    console.log(`Saved raw API response to ${outputFile}`);
     
-    // Extract horse data
+    // Extract horse data from first response
     const horses = extractHorsesFromResponse(response.data, trackName);
+    totalHorses = [...totalHorses, ...horses];
     
-    if (horses.length > 0) {
-      console.log(`Extracted ${horses.length} horses for ${trackName}`);
+    // Check if there are more results to fetch (pagination)
+    if (response.data.total && response.data.total > limit) {
+      totalFound = response.data.total;
+      console.log(`Found ${totalFound} total results, fetching additional pages...`);
       
-      // Save extracted horses to file for debugging
-      const horsesFile = `${safeTrackName}_${date}_horses.json`;
-      fs.writeFileSync(horsesFile, JSON.stringify(horses, null, 2));
-    } else {
-      console.log(`No horses found for ${trackName} in the ${endpoint} response`);
+      // Continue fetching while there are more pages
+      skip += limit;
+      while (skip < totalFound) {
+        console.log(`Fetching page with skip=${skip}, limit=${limit}`);
+        
+        // Update pagination parameters
+        params.skip = skip;
+        
+        // Adding small delay between calls
+        await sleep(500);
+        
+        // Make next API call
+        const nextResponse = await racingApi.get('/results', { params });
+        
+        // Extract horses from this page
+        const nextHorses = extractHorsesFromResponse(nextResponse.data, trackName);
+        totalHorses = [...totalHorses, ...nextHorses];
+        
+        // Move to next page
+        skip += limit;
+      }
     }
     
-    return horses;
+    console.log(`Total horses found for ${trackName}: ${totalHorses.length}`);
+    
+    // Save extracted horses to file only if we found some
+    if (totalHorses.length > 0) {
+      const horsesFile = `${safeTrackName}_${date}_horses.json`;
+      fs.writeFileSync(horsesFile, JSON.stringify(totalHorses, null, 2));
+    }
+    
+    return totalHorses;
     
   } catch (error) {
-    console.error(`Error fetching ${endpoint} for ${trackName} on ${date}:`, error.message);
+    console.error(`Error fetching results for ${trackName} on ${date}:`, error.message);
     if (error.response) {
       console.error(`API Status: ${error.response.status}`);
       if (error.response.data) {
-        console.error(`API Response: ${JSON.stringify(error.response.data || {}).substring(0, 200)}...`);
+        console.error(`API Error: ${JSON.stringify(error.response.data || {}).substring(0, 200)}...`);
       }
     }
     return [];
@@ -299,75 +285,35 @@ function extractHorsesFromResponse(apiData, targetTrack) {
   const horses = [];
   const cleanTargetTrack = cleanName(targetTrack);
   
-  // Recursive function to find horse data
-  function findHorses(obj, context = {}) {
-    if (!obj || typeof obj !== 'object') return;
-    
-    // Update context with track info
-    if (obj.meeting_name) context.track = obj.meeting_name;
-    if (obj.course) context.track = obj.course;
-    if (obj.venue) context.track = obj.venue;
-    if (obj.track) context.track = obj.track;
-    
-    // Update context with race info
-    if (obj.time) context.time = obj.time;
-    if (obj.race_time) context.time = obj.race_time;
-    if (obj.race_id) context.race_id = obj.race_id;
-    if (obj.id && !context.race_id) context.race_id = obj.id;
-    if (obj.race_name) context.race_name = obj.race_name;
-    if (obj.name && !context.race_name) context.race_name = obj.name;
-    if (obj.runners?.length) context.total_runners = obj.runners.length;
-    if (obj.results?.length) context.total_runners = obj.results.length;
-    
-    // Check if this object is a horse/runner
-    if ((obj.horse || obj.name) && 
-        (obj.position !== undefined || obj.finish_position !== undefined)) {
-      
-      const trackName = context.track || targetTrack;
+  // Direct access to results array if available
+  if (apiData && apiData.results && Array.isArray(apiData.results)) {
+    apiData.results.forEach(race => {
+      // Check if this is for our target track
+      const trackName = race.meeting_name || race.course || race.venue || '';
       const cleanTrack = cleanName(trackName);
       
-      // Only include horses from the target track
       if (isSimilarTrack(cleanTrack, cleanTargetTrack)) {
-        horses.push({
-          horse_name: obj.horse || obj.name,
-          track_name: trackName,
-          position: obj.position || obj.finish_position,
-          sp: obj.sp_dec || obj.sp || null,
-          bsp: obj.bsp || null,
-          ovr_btn: obj.ovr_btn || obj.btn || '0',
-          btn: obj.btn || '0',
-          race_time: context.time || '',
-          race_id: context.race_id || '',
-          race_name: context.race_name || '',
-          total_runners: context.total_runners || 0,
-          simplified_name: simplifyHorseName(obj.horse || obj.name || '')
-        });
+        // Process each runner in the race
+        if (race.runners && Array.isArray(race.runners)) {
+          race.runners.forEach(runner => {
+            horses.push({
+              horse_name: runner.horse || runner.name,
+              track_name: trackName,
+              position: runner.position || runner.finish_position,
+              sp: runner.sp_dec || runner.sp || null,
+              bsp: runner.bsp || null,
+              ovr_btn: runner.ovr_btn || runner.btn || '0',
+              btn: runner.btn || '0',
+              race_time: race.time || race.race_time || '',
+              race_id: race.race_id || race.id || '',
+              race_name: race.race_name || race.name || '',
+              total_runners: race.runners.length,
+              simplified_name: simplifyHorseName(runner.horse || runner.name || '')
+            });
+          });
+        }
       }
-      return;
-    }
-    
-    // Process arrays
-    if (Array.isArray(obj)) {
-      obj.forEach(item => findHorses(item, {...context}));
-      return;
-    }
-    
-    // Process object properties
-    for (const [key, value] of Object.entries(obj)) {
-      findHorses(value, {...context});
-    }
-  }
-  
-  findHorses(apiData);
-  
-  if (horses.length > 0) {
-    console.log(`Found ${horses.length} horses for ${targetTrack}`);
-    
-    // Print a few sample horse names
-    console.log('Sample horses:');
-    horses.slice(0, 5).forEach(h => console.log(`- ${h.horse_name}`));
-  } else {
-    console.log(`No horses found for ${targetTrack}`);
+    });
   }
   
   return horses;
@@ -375,8 +321,7 @@ function extractHorsesFromResponse(apiData, targetTrack) {
 
 // Process a single bet
 async function processSingleBet(bet, horses) {
-  console.log(`\nProcessing bet ID: ${bet.id}`);
-  console.log(`Horse: ${bet.horse_name}, Track: ${bet.track_name}`);
+  console.log(`Processing bet: ${bet.id} - ${bet.horse_name}`);
   
   if (!bet.horse_name) {
     console.log(`Skipping bet ID ${bet.id} - missing horse name`);
@@ -391,7 +336,7 @@ async function processSingleBet(bet, horses) {
     return false;
   }
   
-  console.log(`MATCH FOUND: ${bet.horse_name} → ${horseResult.horse_name} (Position: ${horseResult.position})`);
+  console.log(`MATCH: ${bet.horse_name} → ${horseResult.horse_name} (Position: ${horseResult.position})`);
   
   // Calculate returns
   const numRunners = parseInt(horseResult.total_runners) || 0;
@@ -435,7 +380,7 @@ async function processSingleBet(bet, horses) {
     return false;
   }
   
-  console.log(`Successfully updated bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
+  console.log(`Updated bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
   return true;
 }
 
@@ -514,7 +459,7 @@ async function processMultipleBet(bet, horses) {
     return false;
   }
   
-  console.log(`Successfully updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
+  console.log(`Updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
   return true;
 }
 
@@ -525,8 +470,6 @@ function findHorseMatch(horseName, horses) {
   const cleanHorse = cleanHorseName(horseName);
   const simplifiedHorse = simplifyHorseName(horseName);
   
-  console.log(`Looking for horse: "${cleanHorse}"`);
-  
   // Matching strategies in order of priority
   
   // 1. Exact name match
@@ -535,7 +478,6 @@ function findHorseMatch(horseName, horses) {
   );
   
   if (exactMatch) {
-    console.log(`MATCH FOUND: Exact match for "${horseName}", position: ${exactMatch.position}`);
     return exactMatch;
   }
   
@@ -545,7 +487,6 @@ function findHorseMatch(horseName, horses) {
   );
   
   if (simplifiedMatch) {
-    console.log(`MATCH FOUND: Simplified name match "${horseName}" → "${simplifiedMatch.horse_name}", position: ${simplifiedMatch.position}`);
     return simplifiedMatch;
   }
   
@@ -556,7 +497,6 @@ function findHorseMatch(horseName, horses) {
   });
   
   if (partialMatch) {
-    console.log(`MATCH FOUND: Partial match for "${horseName}" → "${partialMatch.horse_name}", position: ${partialMatch.position}`);
     return partialMatch;
   }
   
@@ -564,17 +504,9 @@ function findHorseMatch(horseName, horses) {
   const fuzzyMatch = findClosestMatch(cleanHorse, horses);
   
   if (fuzzyMatch) {
-    console.log(`MATCH FOUND: Fuzzy match for "${horseName}" → "${fuzzyMatch.horse_name}", position: ${fuzzyMatch.position}`);
     return fuzzyMatch;
   }
   
-  // Show all horses for debugging
-  console.log(`Available horses (showing first 10):`);
-  horses.slice(0, 10).forEach(h => {
-    console.log(`- ${h.horse_name} (position: ${h.position})`);
-  });
-  
-  console.log(`NO MATCH: Horse "${horseName}" not found`);
   return null;
 }
 
@@ -623,10 +555,6 @@ function findClosestMatch(horseName, horses) {
       bestDistance = distance;
       bestMatch = horse;
     }
-  }
-  
-  if (bestMatch) {
-    console.log(`Fuzzy match found with distance ${bestDistance}`);
   }
   
   return bestMatch;
