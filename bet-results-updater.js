@@ -30,7 +30,11 @@ const TRACK_CODES = {
   'nottingham': 'crs_1040',
   'leopardstown': 'crs_4862',
   'taunton': 'crs_1898',
-  'kempton': 'crs_28054'
+  'kempton': 'crs_28054',
+  'limerick': 'crs_4868',
+  'hereford': 'crs_778',
+  'lingfield': 'crs_910',
+  'newton abbot': 'crs_1026'
 };
 
 // Track cache to avoid repeated API calls for the same track
@@ -200,6 +204,14 @@ function findCourseId(trackName) {
   // Direct match
   if (TRACK_CODES[cleanTrack]) {
     return TRACK_CODES[cleanTrack];
+  }
+  
+  // Handle track with (AW) and similar suffixes
+  if (cleanTrack.includes('(')) {
+    const baseName = cleanTrack.split('(')[0].trim();
+    if (TRACK_CODES[baseName]) {
+      return TRACK_CODES[baseName];
+    }
   }
   
   // Try with common prefix/suffix removal
@@ -445,24 +457,51 @@ async function processMultipleBet(bet) {
   
   console.log(`Found all ${selections.length} horses in multiple bet`);
   
+  // Log the detailed horse data for debugging
+  const horseDataDetails = horseResults.map(h => ({
+    name: h.horse_name,
+    position: h.position,
+    sp: h.sp,
+    ovr_btn: h.ovr_btn
+  }));
+  console.log(`Horse data details: ${JSON.stringify(horseDataDetails, null, 2)}`);
+  
   // Check if all horses won (for calculating returns)
   const allWon = horseResults.every(hr => parseInt(hr.position) === 1);
   
-  // Format data for display (string format with slashes)
+  // Format data for display and database
   const positionsFormatted = horseResults.map(hr => hr.position).join(' / ');
-  const spFormatted = horseResults.map(hr => hr.sp || '0').join(' / ');
+  const spValuesFormatted = horseResults.map(hr => hr.sp || '0').join(' / ');
   
-  // Calculate numeric values (for database)
+  // Calculate numeric values for database (IMPORTANT: must be a single numeric value, not a string with slashes)
   let combinedOvrBtn = 0;
-  horseResults.forEach((hr, index) => {
-    const numValue = extractNumericValue(hr.ovr_btn);
-    if (index === 0) {
-      combinedOvrBtn = numValue;
-    } else {
-      // For multiple horses, average the beaten distances
-      combinedOvrBtn = (combinedOvrBtn + numValue) / 2;
+  let validOvrBtn = true;
+  
+  try {
+    // For multiple horses in a bet, calculate the average beaten distance
+    let totalOvrBtn = 0;
+    for (const hr of horseResults) {
+      const numValue = extractNumericValue(hr.ovr_btn);
+      if (numValue !== null) {
+        totalOvrBtn += numValue;
+      } else {
+        validOvrBtn = false;
+        break;
+      }
     }
-  });
+    
+    // Only set a value if we have valid numbers
+    if (validOvrBtn && horseResults.length > 0) {
+      combinedOvrBtn = totalOvrBtn / horseResults.length;
+    } else {
+      combinedOvrBtn = 0; // Default if no valid values
+    }
+    
+    console.log(`Combined ovr_btn numeric value: ${combinedOvrBtn}`);
+  } catch (err) {
+    console.error(`Error calculating combined ovr_btn: ${err.message}`);
+    combinedOvrBtn = 0; // Default to 0 on error
+  }
   
   // For BSP calculations
   let combinedBSP = 1;
@@ -489,34 +528,57 @@ async function processMultipleBet(bet) {
   const returns = status === 'Won' ? bet.stake * bet.odds : 0;
   const profitLoss = returns - bet.stake;
   
-  // Update bet in Supabase
-  const { error } = await supabase
-    .from('racing_bets')
-    .update({
-      status: status,
-      returns: returns,
-      profit_loss: profitLoss,
-      sp_industry: spFormatted, // This can be string formatted
-      ovr_btn: combinedOvrBtn, // This must be numeric
-      closing_line_value: allHaveBSP ? calculateCLVForMultiple(bet, combinedBSP) : null,
-      clv_stake: allHaveBSP ? calculateCLVStakeForMultiple(bet, combinedBSP) : null,
-      fin_pos: positionsFormatted, // This can be string formatted
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', bet.id);
+  // Prepare update data
+  const updateData = {
+    status: status,
+    returns: returns,
+    profit_loss: profitLoss,
+    fin_pos: positionsFormatted, // String format is ok for text field
+    updated_at: new Date().toISOString()
+  };
   
-  if (error) {
-    console.error(`Error updating multiple bet ID ${bet.id}:`, error.message);
-    return false;
+  // Only add numeric fields if they're valid numbers
+  if (validOvrBtn) {
+    updateData.ovr_btn = combinedOvrBtn;
   }
   
-  console.log(`Updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
-  return true;
+  // Store SP as a text value since the database schema allows it
+  updateData.sp_industry = spValuesFormatted;
+  
+  // Add BSP-related fields only if valid
+  if (allHaveBSP) {
+    updateData.closing_line_value = calculateCLVForMultiple(bet, combinedBSP);
+    updateData.clv_stake = calculateCLVStakeForMultiple(bet, combinedBSP);
+  }
+  
+  console.log(`Update data for multiple bet: ${JSON.stringify(updateData, null, 2)}`);
+  
+  // Update bet in Supabase
+  try {
+    const { error } = await supabase
+      .from('racing_bets')
+      .update(updateData)
+      .eq('id', bet.id);
+    
+    if (error) {
+      console.error(`Error updating multiple bet ID ${bet.id}:`, error.message);
+      return false;
+    }
+    
+    console.log(`Updated multiple bet ID: ${bet.id}, Status: ${status}, Returns: ${returns}`);
+    return true;
+  } catch (err) {
+    console.error(`Exception updating multiple bet ID ${bet.id}:`, err.message);
+    return false;
+  }
 }
 
 // Find horse match in results (we already filtered by track)
 function findHorseMatch(horseName, horses) {
   if (!horseName || !horses || horses.length === 0) return null;
+  
+  // Log how many horses we're searching through
+  console.log(`Searching through ${horses.length} horses for a match to "${horseName}"`);
   
   const cleanHorse = cleanHorseName(horseName);
   const simplifiedHorse = simplifyHorseName(horseName);
@@ -529,6 +591,7 @@ function findHorseMatch(horseName, horses) {
   );
   
   if (exactMatch) {
+    console.log(`Found exact match for "${horseName}": "${exactMatch.horse_name}"`);
     return exactMatch;
   }
   
@@ -538,6 +601,7 @@ function findHorseMatch(horseName, horses) {
   );
   
   if (simplifiedMatch) {
+    console.log(`Found simplified name match for "${horseName}": "${simplifiedMatch.horse_name}"`);
     return simplifiedMatch;
   }
   
@@ -548,6 +612,7 @@ function findHorseMatch(horseName, horses) {
   });
   
   if (partialMatch) {
+    console.log(`Found partial match for "${horseName}": "${partialMatch.horse_name}"`);
     return partialMatch;
   }
   
@@ -555,9 +620,11 @@ function findHorseMatch(horseName, horses) {
   const fuzzyMatch = findClosestMatch(cleanHorse, horses);
   
   if (fuzzyMatch) {
+    console.log(`Found fuzzy match for "${horseName}": "${fuzzyMatch.horse_name}"`);
     return fuzzyMatch;
   }
   
+  console.log(`No match found for horse "${horseName}" using any matching method`);
   return null;
 }
 
@@ -658,6 +725,7 @@ function extractNumericValue(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
+    // Remove all non-numeric characters except decimal point
     const numericStr = value.replace(/[^0-9.]/g, '');
     if (numericStr === '') return 0;
     return parseFloat(numericStr);
