@@ -1,24 +1,40 @@
 {
   "course_list": [
     {
-      "id": "crs_19734",
+      "id": "crs_260",
       "name": "Catterick"
     },
     {
-      "id": "crs_38742",
+      "id": "crs_1040",
       "name": "Nottingham"
     },
     {
-      "id": "crs_32789",
+      "id": "crs_4862",
       "name": "Leopardstown"
     },
     {
-      "id": "crs_29348",
+      "id": "crs_28054",
       "name": "Kempton"
     },
     {
-      "id": "crs_23985",
+      "id": "crs_1898",
       "name": "Taunton"
+    },
+    {
+      "id": "crs_910",
+      "name": "Lingfield"
+    },
+    {
+      "id": "crs_4868",
+      "name": "Limerick"
+    },
+    {
+      "id": "crs_778",
+      "name": "Hereford"
+    },
+    {
+      "id": "crs_1026",
+      "name": "Newton Abbot"
     }
   ]
 }
