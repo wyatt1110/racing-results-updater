@@ -285,3 +285,185 @@ function levenshteinDistance(a, b) {
   
   return matrix[b.length][a.length];
 }
+
+// Fetch race results from the API with improved error handling
+async function fetchRaceResults(trackName, date, courseId) {
+  Logger.info(`Fetching results for ${trackName} on ${date} with course ID ${courseId}`);
+  
+  try {
+    // Prepare base API params
+    const params = { 
+      start_date: date
+    };
+    
+    // Add course ID if we have it (correctly formatted)
+    if (courseId) {
+      params.course = courseId;
+    } else {
+      Logger.error(`No course ID available for ${trackName}, cannot make API call`);
+      return [];
+    }
+    
+    // Log API request details
+    Logger.debug(`API Request: ${racingApiBase}/results with params:`, params);
+    
+    // Make the API call
+    const response = await racingApi.get('/results', { params });
+    
+    // Create a safe filename for saving the response
+    const safeTrackName = trackName.replace(/[^a-zA-Z0-9]/g, '_');
+    const responseFile = `${safeTrackName}_${date}_response.json`;
+    
+    // Save the raw response for debugging
+    fs.writeFileSync(responseFile, JSON.stringify(response.data, null, 2));
+    Logger.debug(`Saved API response to ${responseFile}`);
+    
+    // Extract horse data from the response
+    const horses = extractHorsesFromResponse(response.data, trackName);
+    
+    if (horses.length > 0) {
+      Logger.info(`Found ${horses.length} horses for ${trackName} on ${date}`);
+      
+      // Save extracted horses data for debugging if needed
+      const horsesFile = `${safeTrackName}_${date}_horses.json`;
+      fs.writeFileSync(horsesFile, JSON.stringify(horses, null, 2));
+      Logger.debug(`Saved extracted horses to ${horsesFile}`);
+    } else {
+      Logger.warn(`No horses found for ${trackName} on ${date} in API response`);
+    }
+    
+    return horses;
+  } catch (error) {
+    Logger.error(`Error fetching race results for ${trackName}:`, error);
+    
+    // Check for specific error types and provide more detail
+    if (error.response) {
+      if (error.response.status === 404) {
+        Logger.error(`404 Not Found - Check course ID ${courseId} for track ${trackName}`);
+      } else if (error.response.status === 401) {
+        Logger.error('Authentication error - Check API credentials');
+      } else if (error.response.status === 429) {
+        Logger.error('Rate limit exceeded - Too many requests');
+      }
+    }
+    
+    return [];
+  }
+}
+
+// Extract horse data from API response with improved matching
+function extractHorsesFromResponse(apiData, targetTrack) {
+  const horses = [];
+  
+  if (!apiData || !apiData.results || !Array.isArray(apiData.results)) {
+    Logger.error(`Invalid API response structure for ${targetTrack}`);
+    return horses;
+  }
+  
+  // Clean target track name for matching
+  const cleanTarget = targetTrack.toLowerCase()
+    .replace(/\\s*\\(aw\\)$/i, '')
+    .replace(/\\s*\\(all weather\\)$/i, '')
+    .replace(/\\s*racecourse$/i, '')
+    .replace(/\\s*races$/i, '')
+    .replace(/\\s*park$/i, '')
+    .trim();
+  
+  Logger.debug(`Looking for races at "${cleanTarget}" in API response`);
+  
+  // Process each race in the results
+  apiData.results.forEach(race => {
+    try {
+      // Get the track from the race
+      const raceTrack = (race.course || '').toLowerCase().trim();
+      const raceTrackClean = raceTrack
+        .replace(/\\s*\\(aw\\)$/i, '')
+        .replace(/\\s*\\(all weather\\)$/i, '')
+        .replace(/\\s*racecourse$/i, '')
+        .replace(/\\s*races$/i, '')
+        .replace(/\\s*park$/i, '')
+        .trim();
+      
+      // Check if this race is from our target track using more flexible matching
+      const matchScore = calculateSimilarity(raceTrackClean, cleanTarget);
+      const isMatch = 
+        raceTrackClean.includes(cleanTarget) || 
+        cleanTarget.includes(raceTrackClean) ||
+        matchScore > 0.8;
+      
+      if (isMatch) {
+        Logger.debug(`Found matching race at "${race.course}" for "${targetTrack}" (score: ${matchScore.toFixed(2)})`);
+        
+        // Process runners if available
+        if (race.runners && Array.isArray(race.runners)) {
+          race.runners.forEach(runner => {
+            if (!runner.horse) {
+              Logger.debug(`Skipping runner with no horse name in race: ${race.race_name || 'Unknown'}`);
+              return;
+            }
+            
+            // Add each horse to our results with standard fields
+            horses.push({
+              horse_name: runner.horse || '',
+              track_name: race.course || targetTrack,
+              race_time: race.off || race.time || '',
+              race_date: race.date || '',
+              position: runner.position || '',
+              sp: parseNumeric(runner.sp_dec),
+              bsp: parseNumeric(runner.bsp),
+              ovr_btn: parseNumeric(runner.ovr_btn), // Using ovr_btn, which is correct field name in API
+              btn: parseNumeric(runner.btn),
+              total_runners: race.runners.length,
+              race_id: race.race_id || '',
+              race_name: race.race_name || '',
+              simplified_name: simplifyName(runner.horse || ''),
+              jockey: runner.jockey || '',
+              trainer: runner.trainer || ''
+            });
+          });
+          
+          Logger.debug(`Added ${race.runners.length} horses from race ${race.race_name || 'Unknown'}`);
+        } else {
+          Logger.debug(`No runners found in race: ${race.race_name || 'Unknown'}`);
+        }
+      }
+    } catch (e) {
+      Logger.error(`Error processing race in API response: ${e.message}`);
+    }
+  });
+  
+  Logger.info(`Extracted ${horses.length} horses for ${targetTrack}`);
+  return horses;
+}
+
+// Simplify name for easier comparison (remove spaces, punctuation, etc.)
+function simplifyName(name) {
+  if (!name) return '';
+  
+  return name.toLowerCase()
+    .replace(/[^a-z0-9]/g, '')  // Remove non-alphanumeric chars
+    .replace(/the/g, '')        // Remove common words
+    .trim();
+}
+
+// Parse numeric value safely
+function parseNumeric(value) {
+  if (value === null || value === undefined || value === '') return null;
+  
+  // If already a number, just return it
+  if (typeof value === 'number' && !isNaN(value)) return value;
+  
+  // Handle string values
+  if (typeof value === 'string') {
+    // Return null for non-numeric placeholders
+    if (['nr', 'ns', 'rr', 'void', '-'].includes(value.toLowerCase())) {
+      return null;
+    }
+    
+    // Try to convert to number
+    const num = parseFloat(value);
+    return isNaN(num) ? null : num;
+  }
+  
+  return null;
+}
