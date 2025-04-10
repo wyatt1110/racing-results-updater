@@ -33,6 +33,9 @@ const TRACK_CODES = {
   'kempton': 'crs_28054'
 };
 
+// Track cache to avoid repeated API calls for the same track
+const trackHorsesCache = {};
+
 // Main function to update bet results
 async function updateBetResults() {
   console.log('Starting bet results update process...');
@@ -58,11 +61,35 @@ async function updateBetResults() {
     // Sample pending bet for debugging (only log one)
     console.log(`Sample pending bet: ${JSON.stringify(pendingBets[0], null, 2)}`);
     
-    // Group bets by track and date
-    const trackDateGroups = groupBetsByTrackAndDate(pendingBets);
+    // Gather all unique track+date combinations needed
+    const trackDateNeeded = new Map();
     
-    // Print tracks we need to process
-    const uniqueTracks = Object.keys(trackDateGroups);
+    pendingBets.forEach(bet => {
+      if (!bet.track_name || !bet.race_date) return;
+      
+      const date = bet.race_date.split('T')[0];
+      
+      // For multiple bets with multiple tracks
+      if (bet.track_name.includes('/')) {
+        const trackNames = bet.track_name.split('/').map(t => t.trim());
+        trackNames.forEach(track => {
+          const key = `${track}:${date}`;
+          if (!trackDateNeeded.has(key)) {
+            trackDateNeeded.set(key, { track, date });
+          }
+        });
+      } else {
+        // For single track bets
+        const track = bet.track_name.trim();
+        const key = `${track}:${date}`;
+        if (!trackDateNeeded.has(key)) {
+          trackDateNeeded.set(key, { track, date });
+        }
+      }
+    });
+    
+    // Print unique tracks we need to process
+    const uniqueTracks = [...new Set([...trackDateNeeded.values()].map(item => item.track))];
     console.log(`Found ${uniqueTracks.length} unique tracks to process: ${uniqueTracks.join(', ')}`);
     
     // Results storage
@@ -73,61 +100,73 @@ async function updateBetResults() {
       errors: 0
     };
     
-    // Process each track with a separate API call
-    for (const [track, dateGroups] of Object.entries(trackDateGroups)) {
-      for (const [date, bets] of Object.entries(dateGroups)) {
-        console.log(`\nProcessing track: ${track}, date: ${date}, bets: ${bets.length}`);
+    // First pass: Fetch all horse data needed for all tracks
+    for (const [key, { track, date }] of trackDateNeeded.entries()) {
+      console.log(`\nFetching data for track: ${track}, date: ${date}`);
+      
+      try {
+        // Find course ID for this track
+        const courseId = findCourseId(track);
+        if (courseId) {
+          console.log(`Found course ID for ${track}: ${courseId}`);
+        } else {
+          console.log(`No course ID found for ${track}`);
+        }
         
-        try {
-          // Find course ID for this track
-          const courseId = findCourseId(track);
-          if (courseId) {
-            console.log(`Found course ID for ${track}: ${courseId}`);
-          } else {
-            console.log(`No course ID found for ${track}`);
-          }
-          
-          // Fetch results for this track and date
+        // Fetch results for this track and date if not already cached
+        if (!trackHorsesCache[key]) {
           console.log(`Fetching results for ${date}, course ID: ${courseId || 'N/A'}`);
-          let horses = [];
-          
-          // Try specific date+course search
-          horses = await fetchResultsByDateAndCourse(track, date, courseId);
+          trackHorsesCache[key] = await fetchResultsByDateAndCourse(track, date, courseId);
+          console.log(`Found ${trackHorsesCache[key].length} horses for ${track} on ${date}`);
+        } else {
+          console.log(`Using cached data for ${track} on ${date} (${trackHorsesCache[key].length} horses)`);
+        }
+        
+        // Wait between API calls to avoid rate limiting
+        await sleep(2000);
+      } catch (error) {
+        console.error(`Error fetching data for ${track} on ${date}:`, error.message);
+      }
+    }
+    
+    // Second pass: Process all bets now that we have the horse data
+    for (const bet of pendingBets) {
+      if (!bet.track_name || !bet.race_date || !bet.horse_name) {
+        console.log(`Skipping bet ID ${bet.id} - missing required fields`);
+        results.noMatch++;
+        continue;
+      }
+      
+      try {
+        const isMultiple = bet.horse_name.includes('/');
+        let success = false;
+        
+        if (isMultiple) {
+          success = await processMultipleBet(bet);
+        } else {
+          // Get the track horses from cache
+          const date = bet.race_date.split('T')[0];
+          const track = bet.track_name.trim();
+          const cacheKey = `${track}:${date}`;
+          const horses = trackHorsesCache[cacheKey] || [];
           
           if (horses.length === 0) {
-            console.log(`No horses found for ${track} on ${date}, skipping ${bets.length} bets`);
-            results.noMatch += bets.length;
+            console.log(`No horses found for ${track} on ${date} for bet ${bet.id}`);
+            results.noMatch++;
             continue;
           }
           
-          console.log(`Found ${horses.length} horses for ${track} on ${date}`);
-          
-          // Process each bet for this track/date
-          for (const bet of bets) {
-            try {
-              // Process the bet
-              const isMultiple = bet.horse_name && bet.horse_name.includes('/');
-              const success = isMultiple 
-                ? await processMultipleBet(bet, horses)
-                : await processSingleBet(bet, horses);
-                
-              if (success) {
-                results.updated++;
-              } else {
-                results.noMatch++;
-              }
-            } catch (err) {
-              console.error(`Error processing bet ID ${bet.id}:`, err.message);
-              results.errors++;
-            }
-          }
-        } catch (error) {
-          console.error(`Error processing track ${track} on ${date}:`, error.message);
-          results.errors += bets.length;
+          success = await processSingleBet(bet, horses);
         }
         
-        // Wait before next API call to avoid rate limiting
-        await sleep(2000);
+        if (success) {
+          results.updated++;
+        } else {
+          results.noMatch++;
+        }
+      } catch (err) {
+        console.error(`Error processing bet ID ${bet.id}:`, err.message);
+        results.errors++;
       }
     }
     
@@ -150,51 +189,6 @@ async function updateBetResults() {
     console.error('Error in updateBetResults:', error);
     return { success: false, error: error.message };
   }
-}
-
-// Group bets by track and date
-function groupBetsByTrackAndDate(bets) {
-  const groups = {};
-  
-  bets.forEach(bet => {
-    if (!bet.track_name || !bet.race_date) return;
-    
-    // Handle multiple bets (with multiple tracks)
-    if (bet.horse_name && bet.horse_name.includes('/') && bet.track_name.includes('/')) {
-      const horses = bet.horse_name.split('/').map(h => h.trim());
-      const tracks = bet.track_name.split('/').map(t => t.trim());
-      
-      // If number of horses and tracks match, treat as separate bets for API calls
-      if (horses.length === tracks.length) {
-        for (let i = 0; i < tracks.length; i++) {
-          const track = tracks[i];
-          const date = bet.race_date.split('T')[0];
-          
-          if (!groups[track]) groups[track] = {};
-          if (!groups[track][date]) groups[track][date] = [];
-          groups[track][date].push(bet);
-        }
-      } else {
-        // If they don't match, just use the first track
-        const track = tracks[0];
-        const date = bet.race_date.split('T')[0];
-        
-        if (!groups[track]) groups[track] = {};
-        if (!groups[track][date]) groups[track][date] = [];
-        groups[track][date].push(bet);
-      }
-    } else {
-      // Single bets
-      const track = bet.track_name.trim();
-      const date = bet.race_date.split('T')[0];
-      
-      if (!groups[track]) groups[track] = {};
-      if (!groups[track][date]) groups[track][date] = [];
-      groups[track][date].push(bet);
-    }
-  });
-  
-  return groups;
 }
 
 // Find course ID based on track name
@@ -415,7 +409,7 @@ async function processSingleBet(bet, horses) {
 }
 
 // Process a multiple bet
-async function processMultipleBet(bet, horses) {
+async function processMultipleBet(bet) {
   const selections = bet.horse_name.split('/').map(s => s.trim());
   const trackNames = bet.track_name ? bet.track_name.split('/').map(t => t.trim()) : [];
   
@@ -425,11 +419,24 @@ async function processMultipleBet(bet, horses) {
   const horseResults = [];
   
   for (let i = 0; i < selections.length; i++) {
-    // We already filtered by track, so just match by horse name
-    const horseResult = findHorseMatch(selections[i], horses);
+    const horseName = selections[i];
+    const trackName = trackNames[i] || trackNames[0] || bet.track_name;
+    const date = bet.race_date.split('T')[0];
+    
+    // Get the correct track horses from cache
+    const cacheKey = `${trackName}:${date}`;
+    const trackHorses = trackHorsesCache[cacheKey] || [];
+    
+    if (trackHorses.length === 0) {
+      console.log(`No horses found for ${trackName} on ${date} for horse ${horseName}`);
+      return false;
+    }
+    
+    // Find this horse in the relevant track results
+    const horseResult = findHorseMatch(horseName, trackHorses);
     
     if (!horseResult) {
-      console.log(`No match found for ${selections[i]}`);
+      console.log(`No match found for ${horseName} at ${trackName}`);
       return false;
     }
     
@@ -438,15 +445,26 @@ async function processMultipleBet(bet, horses) {
   
   console.log(`Found all ${selections.length} horses in multiple bet`);
   
-  // Check if all horses won
+  // Check if all horses won (for calculating returns)
   const allWon = horseResults.every(hr => parseInt(hr.position) === 1);
   
-  // Format data for update
+  // Format data for display (string format with slashes)
   const positionsFormatted = horseResults.map(hr => hr.position).join(' / ');
-  const ovrBtnFormatted = horseResults.map(hr => extractNumericValue(hr.ovr_btn) || '0').join(' / ');
   const spFormatted = horseResults.map(hr => hr.sp || '0').join(' / ');
   
-  // Calculate combined BSP
+  // Calculate numeric values (for database)
+  let combinedOvrBtn = 0;
+  horseResults.forEach((hr, index) => {
+    const numValue = extractNumericValue(hr.ovr_btn);
+    if (index === 0) {
+      combinedOvrBtn = numValue;
+    } else {
+      // For multiple horses, average the beaten distances
+      combinedOvrBtn = (combinedOvrBtn + numValue) / 2;
+    }
+  });
+  
+  // For BSP calculations
   let combinedBSP = 1;
   let allHaveBSP = true;
   
@@ -462,7 +480,10 @@ async function processMultipleBet(bet, horses) {
   
   // Determine bet result
   let status = 'Lost';
-  if ((bet.bet_type === 'win' || !bet.bet_type) && allWon) status = 'Won';
+  if ((bet.bet_type === 'win' || bet.bet_type === 'double' || bet.bet_type === 'treble' || 
+       bet.bet_type === 'accumulator' || !bet.bet_type) && allWon) {
+    status = 'Won';
+  }
   
   // Calculate returns
   const returns = status === 'Won' ? bet.stake * bet.odds : 0;
@@ -475,11 +496,11 @@ async function processMultipleBet(bet, horses) {
       status: status,
       returns: returns,
       profit_loss: profitLoss,
-      sp_industry: spFormatted,
-      ovr_btn: ovrBtnFormatted,
+      sp_industry: spFormatted, // This can be string formatted
+      ovr_btn: combinedOvrBtn, // This must be numeric
       closing_line_value: allHaveBSP ? calculateCLVForMultiple(bet, combinedBSP) : null,
       clv_stake: allHaveBSP ? calculateCLVStakeForMultiple(bet, combinedBSP) : null,
-      fin_pos: positionsFormatted,
+      fin_pos: positionsFormatted, // This can be string formatted
       updated_at: new Date().toISOString()
     })
     .eq('id', bet.id);
