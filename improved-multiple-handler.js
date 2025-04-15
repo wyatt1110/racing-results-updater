@@ -191,15 +191,50 @@ function calculateMultipleBetResult(bet, horses, totalSelections) {
   let returns = 0;
   
   if (status === 'Won') {
-    // For a winning accumulator, multiply all odds together
-    // (stake × odds1 × odds2 × ... × oddsN)
-    const totalOdds = horses.reduce((acc, horse) => {
-      // Use the starting price (SP) if available, otherwise fall back to bet odds
-      const horseOdds = horse.sp || bet.odds / totalSelections; // Fallback to dividing total odds
-      return acc * horseOdds;
-    }, 1);
-    
-    returns = parseFloat(bet.stake || 0) * totalOdds;
+    // Check if this is an each-way bet
+    if (bet.each_way === true) {
+      // FIXED: For a winning each-way multiple bet
+      const totalStake = parseFloat(bet.stake || 0);
+      const winStake = totalStake / 2;  // Half stake on win
+      const placeStake = totalStake / 2; // Half stake on place
+      
+      // For a winning multiple, we need to calculate both win and place parts
+      // Calculate cumulative odds for win part (full odds)
+      const winOdds = horses.reduce((acc, horse) => {
+        // Use the starting price (SP) if available, otherwise fall back to bet odds
+        const horseOdds = horse.sp || bet.odds / totalSelections; // Fallback to dividing total odds
+        return acc * horseOdds;
+      }, 1);
+      
+      // Calculate cumulative odds for place part (at place terms)
+      const placeOdds = horses.reduce((acc, horse) => {
+        // Use the starting price (SP) if available, otherwise fall back to bet odds
+        const baseOdds = horse.sp || bet.odds / totalSelections;
+        // Apply place terms (using 1/5 as a standard for simplicity)
+        const placeFraction = 0.2; // Simplified to 1/5 for multiple bets
+        const horsePlace = (baseOdds - 1) * placeFraction + 1;
+        return acc * horsePlace;
+      }, 1);
+      
+      // Calculate returns for both parts
+      const winReturns = winStake * winOdds;
+      const placeReturns = placeStake * placeOdds;
+      
+      // Total returns is the sum of both parts
+      returns = winReturns + placeReturns;
+      
+      console.log(`E/W multiple won: Win part: ${winStake} @ ${winOdds} = ${winReturns}, Place part: ${placeStake} @ ${placeOdds} = ${placeReturns}, Total: ${returns}`);
+    } else {
+      // For a regular winning accumulator, multiply all odds together
+      // (stake × odds1 × odds2 × ... × oddsN)
+      const totalOdds = horses.reduce((acc, horse) => {
+        // Use the starting price (SP) if available, otherwise fall back to bet odds
+        const horseOdds = horse.sp || bet.odds / totalSelections; // Fallback to dividing total odds
+        return acc * horseOdds;
+      }, 1);
+      
+      returns = parseFloat(bet.stake || 0) * totalOdds;
+    }
   } else if (status === 'Void') {
     // All selections void, return stake
     returns = parseFloat(bet.stake || 0);
@@ -210,12 +245,41 @@ function calculateMultipleBetResult(bet, horses, totalSelections) {
     
     if (winners.length === runnersCount) {
       // All that ran won, calculate returns with reduced odds
-      const reducedOdds = winners.reduce((acc, horse) => {
-        const horseOdds = horse.sp || bet.odds / totalSelections; 
-        return acc * horseOdds;
-      }, 1);
-      
-      returns = parseFloat(bet.stake || 0) * reducedOdds;
+      if (bet.each_way === true) {
+        // For E/W reduced multiples
+        const totalStake = parseFloat(bet.stake || 0);
+        const winStake = totalStake / 2;
+        const placeStake = totalStake / 2;
+        
+        // Calculate reduced win odds (excluding non-runners)
+        const winOdds = winners.reduce((acc, horse) => {
+          const horseOdds = horse.sp || bet.odds / totalSelections;
+          return acc * horseOdds;
+        }, 1);
+        
+        // Calculate reduced place odds (excluding non-runners)
+        const placeOdds = winners.reduce((acc, horse) => {
+          const baseOdds = horse.sp || bet.odds / totalSelections;
+          const placeFraction = 0.2; // Simplified to 1/5 for multiple bets
+          const horsePlace = (baseOdds - 1) * placeFraction + 1;
+          return acc * horsePlace;
+        }, 1);
+        
+        // Calculate returns for both parts
+        const winReturns = winStake * winOdds;
+        const placeReturns = placeStake * placeOdds;
+        
+        returns = winReturns + placeReturns;
+        console.log(`E/W multiple reduced: Win part: ${winStake} @ ${winOdds} = ${winReturns}, Place part: ${placeStake} @ ${placeOdds} = ${placeReturns}, Total: ${returns}`);
+      } else {
+        // For regular multiples
+        const reducedOdds = winners.reduce((acc, horse) => {
+          const horseOdds = horse.sp || bet.odds / totalSelections; 
+          return acc * horseOdds;
+        }, 1);
+        
+        returns = parseFloat(bet.stake || 0) * reducedOdds;
+      }
     } else {
       // Some that ran lost, so the bet is lost
       returns = 0;
