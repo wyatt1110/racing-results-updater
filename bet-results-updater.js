@@ -333,6 +333,13 @@ async function processSingleBet(bet) {
   
   console.log(`Found match: ${horseName} -> ${horse.horse_name} (Position: ${horse.position})`);
   
+  // Check if horse_id is available
+  if (horse.horse_id) {
+    console.log(`Horse ID for ${horse.horse_name}: ${horse.horse_id}`);
+  } else {
+    console.log(`No horse ID found for ${horse.horse_name}`);
+  }
+  
   // Calculate bet status and returns
   const { status, returns, profit_loss, sp_industry, ovr_btn, fin_pos } = calculateBetResult(bet, [horse]);
   
@@ -344,6 +351,11 @@ async function processSingleBet(bet) {
       fin_pos: fin_pos,
       updated_at: new Date().toISOString()
     };
+    
+    // Add horse_id if available
+    if (horse.horse_id) {
+      updateData.horse_id = horse.horse_id;
+    }
     
     // Only add numeric fields if they're valid numbers
     if (returns !== null && !isNaN(returns)) updateData.returns = returns;
@@ -487,21 +499,25 @@ function calculateBetResult(bet, horses) {
     spValue = multipleHandler.parseNumeric(horses[0].sp);
   }
   
-  // Calculate OVR_BTN value
+  // Calculate OVR_BTN value - Modified to SUM for multiples, not average
   let ovrBtnValue = null;
   if (isMultiple) {
-    // For multiples, use average of all horses' values
+    // For multiples, sum all horses' values
     let sum = 0;
-    let count = 0;
+    let allHaveOvrBtn = true;
     
     for (const horse of horses) {
       if (horse.ovr_btn !== null && !isNaN(horse.ovr_btn)) {
         sum += parseFloat(horse.ovr_btn);
-        count++;
+      } else {
+        allHaveOvrBtn = false;
       }
     }
     
-    ovrBtnValue = count > 0 ? sum / count : null;
+    // Only set the value if we could calculate it for at least one horse
+    if (allHaveOvrBtn || horses.some(h => h.ovr_btn !== null && !isNaN(h.ovr_btn))) {
+      ovrBtnValue = sum;
+    }
   } else {
     // For singles, use the horse's value
     ovrBtnValue = multipleHandler.parseNumeric(horses[0].ovr_btn);
