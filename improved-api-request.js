@@ -8,8 +8,10 @@ async function fetchRaceResults(trackName, date, courseId, racingApi, sleep) {
   
   try {
     // Prepare API params - simplify to just the essential parameters
-    // The API documentation indicates start_date and course are the critical parameters
-    const params = { start_date: date };
+    const params = { 
+      start_date: date,
+      end_date: date // Add end_date to ensure we only get this specific date
+    };
     
     // Add course ID if we have it
     if (courseId) {
@@ -45,6 +47,31 @@ async function fetchRaceResults(trackName, date, courseId, racingApi, sleep) {
       console.log(`Saved extracted horses to ${horsesFile}`);
     } else {
       console.log(`No horses found for ${trackName} in API response`);
+      
+      // Try alternate API call without course filter (last resort)
+      console.log(`Trying fallback API call without course filter for ${date}...`);
+      try {
+        const fallbackResponse = await racingApi.get('/results', { 
+          params: { 
+            start_date: date,
+            end_date: date
+          }
+        });
+        
+        console.log(`Fallback API call successful, looking for horses at ${trackName}`);
+        const fallbackHorses = extractHorsesFromResponse(fallbackResponse.data, trackName);
+        
+        if (fallbackHorses.length > 0) {
+          console.log(`Found ${fallbackHorses.length} horses for ${trackName} in fallback API response`);
+          const fallbackFile = `${safeTrackName}_${date}_fallback_horses.json`;
+          fs.writeFileSync(fallbackFile, JSON.stringify(fallbackHorses, null, 2));
+          return fallbackHorses;
+        } else {
+          console.log(`No horses found for ${trackName} in fallback API response either`);
+        }
+      } catch (fallbackError) {
+        console.error(`Fallback API call failed:`, fallbackError.message);
+      }
     }
     
     return horses;
@@ -60,15 +87,42 @@ async function fetchRaceResults(trackName, date, courseId, racingApi, sleep) {
       if (error.response.status === 404) {
         console.error(`404 Not Found - The API couldn't find results for ${trackName} on ${date}`);
         console.error(`This could mean there are no races at this track on this date`);
+        
+        // Try alternate API call without course filter as a fallback
+        console.log(`Trying fallback API call without course filter for ${date}...`);
+        try {
+          const fallbackResponse = await racingApi.get('/results', { 
+            params: { 
+              start_date: date,
+              end_date: date 
+            }
+          });
+          
+          console.log(`Fallback API call successful, looking for horses at ${trackName}`);
+          const fallbackHorses = extractHorsesFromResponse(fallbackResponse.data, trackName);
+          
+          if (fallbackHorses.length > 0) {
+            console.log(`Found ${fallbackHorses.length} horses for ${trackName} in fallback API response`);
+            return fallbackHorses;
+          }
+        } catch (fallbackError) {
+          console.error(`Fallback API call failed:`, fallbackError.message);
+        }
       } else if (error.response.status === 429) {
         console.error(`429 Too Many Requests - Rate limited. Waiting before retrying...`);
         // Wait longer for rate limit errors
-        await sleep(15000);
+        await sleep(30000);
         
         // Retry once with exponential backoff
         try {
           console.log(`Retrying API request for ${trackName}...`);
-          const retryResponse = await racingApi.get('/results', { params: { start_date: date, course: courseId } });
+          const retryResponse = await racingApi.get('/results', { 
+            params: { 
+              start_date: date, 
+              end_date: date,
+              course: courseId 
+            }
+          });
           console.log(`Retry successful for ${trackName}`);
           return extractHorsesFromResponse(retryResponse.data, trackName);
         } catch (retryError) {
@@ -99,8 +153,12 @@ function extractHorsesFromResponse(apiData, targetTrack) {
   
   // Clean target track name for matching
   const cleanTarget = targetTrack.toLowerCase()
-    .replace(/\\s*\\(aw\\)$/i, '')
-    .replace(/\\s*racecourse$/i, '')
+    .replace(/\s*\(aw\)$/i, '')
+    .replace(/\s*\(all weather\)$/i, '')
+    .replace(/\s*\(uk\)$/i, '')
+    .replace(/\s*\(gb\)$/i, '')
+    .replace(/\s*\(ire\)$/i, '')
+    .replace(/\s*racecourse$/i, '')
     .trim();
   
   console.log(`Looking for races at "${cleanTarget}" in API response`);
@@ -114,15 +172,21 @@ function extractHorsesFromResponse(apiData, targetTrack) {
     // Get the track from the race
     const raceTrack = (race.course || '').toLowerCase().trim();
     const raceTrackClean = raceTrack
-      .replace(/\\s*\\(aw\\)$/i, '')
-      .replace(/\\s*racecourse$/i, '')
+      .replace(/\s*\(aw\)$/i, '')
+      .replace(/\s*\(all weather\)$/i, '')
+      .replace(/\s*\(uk\)$/i, '')
+      .replace(/\s*\(gb\)$/i, '')
+      .replace(/\s*\(ire\)$/i, '')
+      .replace(/\s*racecourse$/i, '')
       .trim();
     
     // Check if this race is from our target track using more flexible matching
     const isTrackMatch = 
       raceTrackClean.includes(cleanTarget) || 
       cleanTarget.includes(raceTrackClean) ||
-      levenshteinDistance(raceTrackClean, cleanTarget) <= 2; // Allow small typos
+      raceTrackClean.startsWith(cleanTarget) ||
+      cleanTarget.startsWith(raceTrackClean) ||
+      levenshteinDistance(raceTrackClean, cleanTarget) <= Math.min(3, Math.floor(cleanTarget.length * 0.3));
     
     if (isTrackMatch) {
       console.log(`Found matching race at "${race.course}" for "${targetTrack}"`);
@@ -132,9 +196,14 @@ function extractHorsesFromResponse(apiData, targetTrack) {
         console.log(`Race has ${race.runners.length} runners`);
         
         race.runners.forEach(runner => {
+          // For each horse, create multiple variants of names for better matching later
+          const horseName = runner.horse || '';
+          const simplifiedName = simplifyName(horseName);
+          const nameVariants = generateNameVariants(horseName);
+          
           // Add each horse to our results with enhanced details
           horses.push({
-            horse_name: runner.horse || '',
+            horse_name: horseName,
             track_name: race.course || targetTrack,
             race_time: race.off || race.time || '',
             position: runner.position || '',
@@ -146,10 +215,13 @@ function extractHorsesFromResponse(apiData, targetTrack) {
             total_runners: race.runners.length,
             race_id: race.race_id || '',
             race_name: race.race_name || '',
-            simplified_name: simplifyName(runner.horse || ''),
+            simplified_name: simplifiedName,
+            name_variants: nameVariants,
             // Add jockey and trainer for additional validation
             jockey: runner.jockey || '',
-            trainer: runner.trainer || ''
+            trainer: runner.trainer || '',
+            // Add raw runner data for reference
+            raw_data: runner
           });
         });
       } else {
@@ -160,6 +232,35 @@ function extractHorsesFromResponse(apiData, targetTrack) {
   
   console.log(`Extracted ${horses.length} horses for ${targetTrack}`);
   return horses;
+}
+
+// Generate variants of a horse name for better matching
+function generateNameVariants(name) {
+  if (!name) return [];
+  
+  const variants = [
+    name.toLowerCase(),
+    simplifyName(name),
+    name.toLowerCase().replace(/[^\w\s]/g, ''), // Remove punctuation
+    name.toLowerCase().replace(/\s+/g, ''),     // Remove spaces
+    name.toLowerCase().replace(/the/gi, '')     // Remove "the"
+  ];
+  
+  // Remove (FR), (IRE), etc. country codes
+  const withoutCountry = name.toLowerCase().replace(/\s*\([a-z]{2,3}\)$/i, '');
+  if (withoutCountry !== name.toLowerCase()) {
+    variants.push(withoutCountry);
+    variants.push(simplifyName(withoutCountry));
+  }
+  
+  // Handle common prefixes
+  if (name.toLowerCase().startsWith('the ')) {
+    const withoutThe = name.substring(4);
+    variants.push(withoutThe.toLowerCase());
+    variants.push(simplifyName(withoutThe));
+  }
+  
+  return [...new Set(variants)]; // Remove duplicates
 }
 
 // Simplify name for easier comparison
@@ -227,5 +328,6 @@ module.exports = {
   fetchRaceResults,
   extractHorsesFromResponse,
   simplifyName,
-  parseNumeric
+  parseNumeric,
+  generateNameVariants
 };
