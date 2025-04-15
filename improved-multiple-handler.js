@@ -97,6 +97,11 @@ async function processMultipleBet(bet, trackHorsesCache, supabase) {
       updated_at: new Date().toISOString()
     };
     
+    // Add the horse_id field if available
+    if (betResult.horse_ids) {
+      updateData.horse_id = betResult.horse_ids;
+    }
+    
     // Only add numeric fields if they're valid numbers
     if (betResult.returns !== null && !isNaN(betResult.returns)) 
       updateData.returns = betResult.returns;
@@ -249,24 +254,35 @@ function calculateMultipleBetResult(bet, horses, totalSelections) {
     }
   }
   
-  // Calculate OVR_BTN as average of all horses' values
+  // Calculate OVR_BTN by summing all horses' values (changed from average to sum)
   let ovrBtnValue = null;
   if (horses.length > 0) {
     let sum = 0;
-    let count = 0;
+    let allHaveOvrBtn = true;
     
     for (const horse of horses) {
       const ovrBtn = parseNumeric(horse.ovr_btn);
       if (ovrBtn !== null) {
-        sum += ovrBtn;
-        count++;
+        sum += ovrBtn; // Sum the values instead of calculating an average
+      } else {
+        allHaveOvrBtn = false;
       }
     }
     
-    if (count > 0) {
-      ovrBtnValue = sum / count;
+    // Only set the value if we could calculate it for at least one horse
+    if (allHaveOvrBtn || horses.some(h => parseNumeric(h.ovr_btn) !== null)) {
+      ovrBtnValue = sum;
     }
   }
+  
+  // Collect horse IDs in the same order as the bet selections
+  const horseIds = Array(totalSelections).fill('');
+  horses.forEach(horse => {
+    if (horse.selection_number && horse.selection_number <= totalSelections && horse.horse_id) {
+      horseIds[horse.selection_number - 1] = horse.horse_id;
+    }
+  });
+  const horseIdsString = horseIds.filter(id => id).join(' / ');
   
   return {
     status,
@@ -274,7 +290,8 @@ function calculateMultipleBetResult(bet, horses, totalSelections) {
     profit_loss: profitLoss,
     sp_industry: spValue,
     ovr_btn: ovrBtnValue,
-    fin_pos: finishPositions
+    fin_pos: finishPositions,
+    horse_ids: horseIdsString // Add the horse IDs field
   };
 }
 
