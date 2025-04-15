@@ -29,20 +29,9 @@ const racingApi = axios.create({
 // Sleep function for delay between API calls
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Fallback hardcoded track codes for common tracks (in case file loading fails)
-const FALLBACK_TRACK_CODES = {
-  'catterick': 'crs_260',
-  'nottingham': 'crs_1040',
-  'leopardstown': 'crs_4862',
-  'kempton': 'crs_28054',
-  'lingfield': 'crs_910',
-  'newton abbot': 'crs_1026',
-  'limerick': 'crs_4868',
-  'hereford': 'crs_778'
-};
-
 // Load track codes from JSON file
 let TRACK_CODES = {};
+
 try {
   // Try to load the track codes file
   const trackCodesPath = path.resolve(__dirname, 'Track-codes-list.json');
@@ -90,20 +79,47 @@ try {
     
     console.log(`Successfully loaded ${Object.keys(TRACK_CODES).length} track codes`);
     
-    // Add fallbacks for any missing common tracks
-    for (const [track, id] of Object.entries(FALLBACK_TRACK_CODES)) {
-      if (!TRACK_CODES[track]) {
-        TRACK_CODES[track] = id;
-        console.log(`Added fallback track code for ${track}: ${id}`);
-      }
+    // Add hardcoded Newmarket if not present
+    if (!TRACK_CODES['newmarket']) {
+      TRACK_CODES['newmarket'] = 'crs_1016';
+      console.log('Added hardcoded Newmarket track code: crs_1016');
     }
   } else {
     throw new Error(`Track-codes-list.json not found at: ${trackCodesPath}`);
   }
 } catch (err) {
   console.error(`Error loading track codes: ${err.message}`);
-  console.log('Falling back to hardcoded track codes');
-  TRACK_CODES = { ...FALLBACK_TRACK_CODES };
+  console.log('Falling back to hardcoded track codes with key UK/IRE tracks');
+  
+  // Essential tracks hardcoded
+  TRACK_CODES = {
+    'newmarket': 'crs_1016',
+    'kempton': 'crs_28054',
+    'kempton (aw)': 'crs_28054',
+    'lingfield': 'crs_910',
+    'lingfield (aw)': 'crs_910',
+    'ascot': 'crs_26',
+    'catterick': 'crs_260',
+    'nottingham': 'crs_1040',
+    'chelmsford': 'crs_286',
+    'chelmsford city': 'crs_286',
+    'doncaster': 'crs_390',
+    'epsom': 'crs_572',
+    'epsom downs': 'crs_572',
+    'goodwood': 'crs_702',
+    'haydock': 'crs_776',
+    'haydock park': 'crs_776',
+    'newbury': 'crs_988',
+    'sandown': 'crs_1222',
+    'sandown park': 'crs_1222',
+    'wolverhampton': 'crs_1638',
+    'wolverhampton (aw)': 'crs_1638',
+    'york': 'crs_1690',
+    'leopardstown': 'crs_4862',
+    'dundalk': 'crs_4368',
+    'dundalk (aw)': 'crs_4368',
+    'fairyhouse': 'crs_4374'
+  };
 }
 
 // Log first 10 track codes for debugging
@@ -147,10 +163,10 @@ async function updateBetResults() {
     // Sample pending bet for debugging (only log one)
     console.log(`Sample pending bet: ${JSON.stringify(pendingBets[0], null, 2)}`);
     
-    // Extract all unique track+date combinations from bets
-    const uniqueTracks = new Set();
+    // Extract all unique track+date combinations from bets (process by track)
     const trackDateCombos = new Map();
     
+    // Group bets by track and date for efficiency
     pendingBets.forEach(bet => {
       if (!bet.track_name || !bet.race_date) return;
       
@@ -164,16 +180,24 @@ async function updateBetResults() {
         trackNames = [bet.track_name.trim()];
       }
       
-      // Add each track to our sets and maps
+      // Add each track to our tracking
       trackNames.forEach(track => {
-        uniqueTracks.add(track);
         const key = `${track}:${date}`;
-        trackDateCombos.set(key, { track, date });
+        if (!trackDateCombos.has(key)) {
+          trackDateCombos.set(key, { track, date, bets: [] });
+        }
+        
+        // Add this bet to the track's list
+        trackDateCombos.get(key).bets.push(bet);
       });
     });
     
-    console.log(`Found ${uniqueTracks.size} unique tracks: ${Array.from(uniqueTracks).join(', ')}`);
     console.log(`Need to fetch ${trackDateCombos.size} track/date combinations`);
+    
+    // Summary of tracks to be processed
+    for (const [key, { track, date, bets }] of trackDateCombos.entries()) {
+      console.log(`- ${track} on ${date}: ${bets.length} bets`);
+    }
     
     // Results tracking
     const results = {
@@ -183,19 +207,13 @@ async function updateBetResults() {
       errors: 0
     };
     
-    // First pass: Fetch all the track data we need
+    // First phase: Process each track and fetch its data
     let index = 0;
     const totalCombos = trackDateCombos.size;
     
-    for (const [key, { track, date }] of trackDateCombos.entries()) {
+    for (const [key, { track, date, bets }] of trackDateCombos.entries()) {
       index++;
-      console.log(`\\n[${index}/${totalCombos}] Processing track: ${track}, date: ${date}`);
-      
-      // Skip if we already have this data cached
-      if (trackHorsesCache[key] && trackHorsesCache[key].length > 0) {
-        console.log(`Using cached data for ${track} (${trackHorsesCache[key].length} horses)`);
-        continue;
-      }
+      console.log(`\n[${index}/${totalCombos}] Processing track: ${track}, date: ${date} (${bets.length} bets)`);
       
       try {
         // Find the course ID using our improved matcher
@@ -206,52 +224,57 @@ async function updateBetResults() {
           
           // Fetch the data from the racing API using our improved module
           const horses = await apiRequest.fetchRaceResults(track, date, courseId, racingApi, sleep);
+          
+          // Store in the cache
           trackHorsesCache[key] = horses;
           
           console.log(`Fetched ${horses.length} horses for ${track} on ${date}`);
-          if (horses.length === 0) {
-            console.log(`WARNING: No horses found for ${track} on ${date} with ID ${courseId}`);
+          
+          // Process the bets for this track immediately
+          for (const bet of bets) {
+            try {
+              const success = await processBet(bet);
+              
+              if (success) {
+                results.updated++;
+              } else {
+                results.noMatches++;
+              }
+            } catch (error) {
+              console.error(`Error processing bet ID ${bet.id}:`, error.message);
+              results.errors++;
+            }
           }
         } else {
           console.error(`ERROR: No course ID found for ${track} in track codes list`);
           trackHorsesCache[key] = [];
+          
+          // Mark all bets for this track as failures
+          for (const bet of bets) {
+            console.log(`Cannot process bet ID ${bet.id} - no course ID for track ${track}`);
+            results.noMatches++;
+          }
         }
         
         // Longer wait between API calls to avoid rate limiting
-        console.log(`Waiting 15 seconds before next API call...`);
-        await sleep(15000);
+        console.log(`Waiting 20 seconds before next API call...`);
+        await sleep(20000);
       } catch (error) {
-        console.error(`Error fetching data for ${track} on ${date}:`, error.message);
+        console.error(`Error processing track ${track} on ${date}:`, error.message);
         trackHorsesCache[key] = [];
+        
+        // Mark all bets for this track as errors
+        for (const bet of bets) {
+          console.log(`Error processing bet ID ${bet.id} due to track API error`);
+          results.errors++;
+        }
+        
         await sleep(5000); // Brief wait even on error
       }
     }
     
-    // Second pass: Process all bets
-    console.log('\\nProcessing all pending bets...');
-    for (const bet of pendingBets) {
-      try {
-        if (!bet.horse_name || !bet.track_name || !bet.race_date) {
-          console.log(`Skipping bet ID ${bet.id} - missing required fields`);
-          results.noMatches++;
-          continue;
-        }
-        
-        const success = await processBet(bet);
-        
-        if (success) {
-          results.updated++;
-        } else {
-          results.noMatches++;
-        }
-      } catch (error) {
-        console.error(`Error processing bet ID ${bet.id}:`, error.message);
-        results.errors++;
-      }
-    }
-    
     // Print results summary
-    console.log('\\nResults Summary:');
+    console.log('\nResults Summary:');
     console.log(`- Total bets processed: ${results.total}`);
     console.log(`- Matches found and updated: ${results.updated}`);
     console.log(`- No matches found: ${results.noMatches}`);
@@ -300,8 +323,8 @@ async function processSingleBet(bet) {
     return false;
   }
   
-  // Find the matching horse
-  const horse = multipleHandler.findHorseMatch(horseName, cachedHorses);
+  // Find the matching horse using enhanced matching
+  const horse = multipleHandler.findHorseMatchEnhanced(horseName, cachedHorses);
   
   if (!horse) {
     console.log(`No match found for horse: ${horseName} at ${trackName}`);
