@@ -461,12 +461,63 @@ function calculateBetResult(bet, horses) {
   let returns = 0;
   
   if (status === 'Won') {
-    // Winning bet gets full odds
-    returns = parseFloat(bet.stake || 0) * parseFloat(bet.odds || 0);
+    if (bet.each_way === true) {
+      // FIXED: For a winning each-way bet, calculate both win and place parts
+      const totalStake = parseFloat(bet.stake || 0);
+      const winStake = totalStake / 2;  // Half stake on win
+      const placeStake = totalStake / 2; // Half stake on place
+      
+      // Calculate place terms based on number of runners
+      const numRunners = horses[0].total_runners || 0;
+      let placeFraction = 0.2; // Default to 1/5 odds
+      
+      if (numRunners >= 16) {
+        placeFraction = 0.25; // 1/4 odds for handicaps with 16+ runners
+      } else if (numRunners < 5) {
+        placeFraction = 0.25; // 1/4 odds for small fields
+      }
+      
+      // Calculate place odds
+      const regularOdds = parseFloat(bet.odds || 0);
+      const placeOdds = (regularOdds - 1) * placeFraction + 1; 
+      
+      // Win part pays at full odds
+      const winReturns = winStake * regularOdds;
+      
+      // Place part pays at place terms
+      const placeReturns = placeStake * placeOdds;
+      
+      // Total returns is sum of win and place parts
+      returns = winReturns + placeReturns;
+      
+      console.log(`E/W bet won: Win part: ${winStake} @ ${regularOdds} = ${winReturns}, Place part: ${placeStake} @ ${placeOdds} = ${placeReturns}, Total: ${returns}`);
+    } else {
+      // Regular win bet
+      returns = parseFloat(bet.stake || 0) * parseFloat(bet.odds || 0);
+    }
   } else if (status === 'Placed' && bet.each_way === true) {
-    // Each-way place pays a fraction
-    const placeOdds = (parseFloat(bet.odds || 0) - 1) * 0.2 + 1; // 1/5 odds typically
-    returns = (parseFloat(bet.stake || 0) / 2) * placeOdds; // Half stake on place
+    // Each-way place pays place part only
+    const totalStake = parseFloat(bet.stake || 0);
+    const placeStake = totalStake / 2; // Half stake on place
+    
+    // Calculate place terms based on number of runners
+    const numRunners = horses[0].total_runners || 0;
+    let placeFraction = 0.2; // Default to 1/5 odds
+    
+    if (numRunners >= 16) {
+      placeFraction = 0.25; // 1/4 odds for handicaps with 16+ runners
+    } else if (numRunners < 5) {
+      placeFraction = 0.25; // 1/4 odds for small fields
+    }
+    
+    // Calculate place odds
+    const regularOdds = parseFloat(bet.odds || 0);
+    const placeOdds = (regularOdds - 1) * placeFraction + 1;
+    
+    // Only place part pays out, win part loses
+    returns = placeStake * placeOdds;
+    
+    console.log(`E/W bet placed: Win part lost, Place part: ${placeStake} @ ${placeOdds} = ${returns}`);
   } else if (status === 'Void') {
     // Void bets return the stake
     returns = parseFloat(bet.stake || 0);
