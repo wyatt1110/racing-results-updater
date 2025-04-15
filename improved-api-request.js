@@ -201,9 +201,20 @@ function extractHorsesFromResponse(apiData, targetTrack) {
           const simplifiedName = simplifyName(horseName);
           const nameVariants = generateNameVariants(horseName);
           
+          // Capture horse_id from the API response
+          const horse_id = runner.horse_id || null;
+          
+          // Log the horse_id for debugging
+          if (horse_id) {
+            console.log(`Found horse ID ${horse_id} for ${horseName}`);
+          } else {
+            console.log(`No horse ID found for ${horseName}`);
+          }
+          
           // Add each horse to our results with enhanced details
           horses.push({
             horse_name: horseName,
+            horse_id: horse_id, // Include the horse_id field
             track_name: race.course || targetTrack,
             race_time: race.off || race.time || '',
             position: runner.position || '',
