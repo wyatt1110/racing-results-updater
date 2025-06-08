@@ -29,7 +29,7 @@ const getYesterdayDate = () => {
 // Make API request to get racing results
 const fetchRacingResults = (date) => {
   return new Promise((resolve, reject) => {
-    const apiUrl = `https://api.theracingapi.com/v1/results?from=${date}&to=${date}`;
+    const apiUrl = `https://api.theracingapi.com/v1/results?start_date=${date}&end_date=${date}`;
     const auth = Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 
     const options = {
