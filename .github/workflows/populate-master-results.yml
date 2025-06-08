@@ -66,7 +66,7 @@ jobs:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         TZ: Europe/London
-      run: npm run populate-master-results
+      run: node populate-master-results.js
       
     - name: Run master results population script (UPDATE)
       if: steps.mode.outputs.mode == 'update'
@@ -74,7 +74,7 @@ jobs:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         TZ: Europe/London
-      run: npm run populate-master-results-update
+      run: node populate-master-results.js --update
       
     - name: Log completion
       run: |
