@@ -137,12 +137,12 @@ const getBspData = async (horseName, raceDate, region) => {
     const tableName = region === 'IRE' ? 'IRE_BSP_Historical' : 'UK_BSP_Historical';
     
     // Convert date format for matching
-    const dateParts = raceDate.split('-'); const bspDateFormat = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+    const dateParts = raceDate.split("-"); const bspDateFormat = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
     
     const { data, error } = await supabase
       .from(tableName)
       .select('*')
-      .ilike('selection_name', `%${horseName}%`)
+      .ilike('selection_name', `%${horseName.replace(/\s*\([A-Z]{2,3}\)$/, "").trim()}%`)
       .ilike('event_dt', `${bspDateFormat}%`)
       .single();
 
