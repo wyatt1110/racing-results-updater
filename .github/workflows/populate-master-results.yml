@@ -1,0 +1,82 @@
+name: Populate Master Results Table
+
+on:
+  schedule:
+    # First run at 12:00 UK time - Insert new records
+    # 12:00 UK Winter (GMT) = 12:00 UTC | 12:00 UK Summer (BST) = 11:00 UTC
+    - cron: '0 11 * * *'  # 11:00 UTC (covers BST)
+    - cron: '0 12 * * *'  # 12:00 UTC (covers GMT)
+    
+    # Second run at 20:00 UK time - Update missing data  
+    # 20:00 UK Winter (GMT) = 20:00 UTC | 20:00 UK Summer (BST) = 19:00 UTC
+    - cron: '0 19 * * *'  # 19:00 UTC (covers BST)
+    - cron: '0 20 * * *'  # 20:00 UTC (covers GMT)
+    
+  workflow_dispatch: # Allow manual triggering
+    inputs:
+      mode:
+        description: 'Run mode (insert or update)'
+        required: false
+        default: 'insert'
+        type: choice
+        options:
+        - insert
+        - update
+
+jobs:
+  populate-master-results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # Longer timeout as this processes lots of data
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Add dotenv dependency
+      run: npm install dotenv
+      
+    - name: Determine run mode
+      id: mode
+      run: |
+        if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event.schedule }}" = "0 11 * * *" ] || [ "${{ github.event.schedule }}" = "0 12 * * *" ]; then
+            echo "mode=insert" >> $GITHUB_OUTPUT
+            echo "description=12:00 UK run (INSERT)" >> $GITHUB_OUTPUT
+          else
+            echo "mode=update" >> $GITHUB_OUTPUT
+            echo "description=20:00 UK run (UPDATE)" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "mode=${{ github.event.inputs.mode || 'insert' }}" >> $GITHUB_OUTPUT
+          echo "description=Manual run (${{ github.event.inputs.mode || 'insert' }})" >> $GITHUB_OUTPUT
+        fi
+      
+    - name: Run master results population script (INSERT)
+      if: steps.mode.outputs.mode == 'insert'
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        TZ: Europe/London
+      run: npm run populate-master-results
+      
+    - name: Run master results population script (UPDATE)
+      if: steps.mode.outputs.mode == 'update'
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        TZ: Europe/London
+      run: npm run populate-master-results-update
+      
+    - name: Log completion
+      run: |
+        echo "Master results population completed at $(date)"
+        echo "Run mode: ${{ steps.mode.outputs.description }}" 
