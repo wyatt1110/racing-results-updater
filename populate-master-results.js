@@ -547,8 +547,8 @@ const main = async () => {
     console.log(`📅 Target date: ${targetDate}`);
     
     // Check if this is a second run (update run)
-    const isUpdate = process.argv.includes('--update');
-    console.log(`🔄 Run mode: ${isUpdate ? 'UPDATE (second run)' : 'INSERT (first run)'}`);
+    const isUpdate = true;
+    console.log(`🔄 Run mode: ${isUpdate ? 'UPDATE (always update existing records)' : 'INSERT-ONLY (skip existing records)'}`);
     
     // Fetch results from API
     const results = await fetchRacingResults(targetDate);
