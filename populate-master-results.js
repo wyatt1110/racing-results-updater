@@ -134,7 +134,7 @@ const getOddsData = async (raceId, horseId) => {
 // Get BSP data from UK or Ireland tables
 const getBspData = async (horseName, raceDate, region) => {
   try {
-    const tableName = region === 'IRE' ? 'ireland_bsp' : 'uk_bsp';
+    const tableName = region === 'IRE' ? 'IRE_BSP_Historical' : 'UK_BSP_Historical';
     
     // Convert date format for matching
     const eventDateString = raceDate; // Already in YYYY-MM-DD format
@@ -500,10 +500,10 @@ const processResults = async (results, isUpdate = false) => {
         const resultRow = buildMasterResultsRow(race, runner, raceData, runnerData, oddsData, bspData);
         
         // Insert or update the record
-        const success = await insertMasterResult(resultRow, exists);
+        const shouldUpdate = exists && isUpdate; const success = await insertMasterResult(resultRow, shouldUpdate);
         
         if (success) {
-          if (exists) {
+          if (shouldUpdate) {
             totalUpdated++;
             console.log(`✅ Updated record for ${runner.horse}`);
           } else {
