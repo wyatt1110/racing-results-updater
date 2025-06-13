@@ -1,0 +1,40 @@
+name: OV Signals Results Updater
+
+on:
+  schedule:
+    # Run daily at 8:00 AM and 8:00 PM UK time
+    - cron: '0 8 * * *'    # 8:00 AM UTC (9:00 AM BST, 8:00 AM GMT)
+    - cron: '0 20 * * *'   # 8:00 PM UTC (9:00 PM BST, 8:00 PM GMT)
+  
+  workflow_dispatch:
+    inputs:
+      manual_run:
+        description: 'Manual run trigger'
+        required: false
+        default: 'true'
+
+jobs:
+  update-ov-signals-results:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm install
+      
+    - name: Run OV Signals Results Updater
+      run: node ov-signals-results.js
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        
+    - name: Log completion
+      run: echo "OV Signals Results update completed at $(date)" 
