@@ -26,44 +26,138 @@ const getYesterdayDate = () => {
   return yesterday.toISOString().split('T')[0];
 };
 
-// Make API request to get racing results
-const fetchRacingResults = (date) => {
-  return new Promise((resolve, reject) => {
-    const apiUrl = `https://api.theracingapi.com/v1/results?start_date=${date}&end_date=${date}`;
-    const auth = Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
+// Function to get a specific date for testing
+const getSpecificDate = (daysAgo) => {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  return date.toISOString().split('T')[0];
+};
 
-    const options = {
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'User-Agent': 'Node.js/Results-Fetcher'
+// Make API request to get racing results with FULL PAGINATION
+const fetchRacingResults = async (date) => {
+  console.log(`🚨 ENTERING fetchRacingResults function for date: ${date}`);
+  
+  const auth = Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
+  const options = {
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'User-Agent': 'Node.js/Results-Fetcher'
+    }
+  };
+
+  let allRaces = [];
+  let skip = 0;
+  let limit = 50; // Maximum allowed by API
+  let totalExpected = 0;
+  let totalFetched = 0;
+  let requestCount = 0;
+
+  console.log(`🔍 Starting paginated fetch for ${date} using limit=${limit} and skip...`);
+
+  try {
+    // Keep fetching until we have all races
+    while (true) {
+      requestCount++;
+      const apiUrl = `https://api.theracingapi.com/v1/results?start_date=${date}&end_date=${date}&limit=${limit}&skip=${skip}`;
+      console.log(`📄 Request ${requestCount}: ${apiUrl}`);
+
+      const pageData = await new Promise((resolve, reject) => {
+        const req = https.get(apiUrl, options, (res) => {
+          console.log(`📡 Request ${requestCount} response status: ${res.statusCode}`);
+          
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
+
+          res.on('end', () => {
+            try {
+              const jsonData = JSON.parse(data);
+              resolve(jsonData);
+            } catch (error) {
+              console.error(`❌ Error parsing request ${requestCount} response:`, error.message);
+              reject(error);
+            }
+          });
+        });
+
+        req.on('error', (error) => {
+          console.error(`❌ Error making API request ${requestCount}:`, error.message);
+          reject(error);
+        });
+
+        req.setTimeout(30000, () => {
+          console.error(`❌ Request timeout for request ${requestCount}`);
+          req.destroy();
+          reject(new Error(`Request timeout for request ${requestCount}`));
+        });
+      });
+
+      // Set total expected from first request
+      if (requestCount === 1) {
+        totalExpected = pageData.total || 0;
+        console.log(`🎯 TOTAL RACES EXPECTED: ${totalExpected}`);
+        
+        if (totalExpected === 0) {
+          console.log(`ℹ️  No races found for ${date}`);
+          break;
+        }
       }
+
+      // Add races from this request
+      const pageRaces = pageData.results || [];
+      allRaces = allRaces.concat(pageRaces);
+      totalFetched += pageRaces.length;
+
+      console.log(`📊 Request ${requestCount}: Got ${pageRaces.length} races (Total so far: ${totalFetched}/${totalExpected})`);
+
+      // Break if no more races on this request or we have all races
+      if (pageRaces.length === 0 || totalFetched >= totalExpected) {
+        console.log(`✅ Finished pagination. Got all ${totalFetched} races.`);
+        break;
+      }
+
+      // Update skip for next request
+      skip += limit;
+      
+      // Safety check to prevent infinite loops
+      if (requestCount > 10) {
+        console.warn(`⚠️  Safety break: Stopped at request ${requestCount} to prevent infinite loop`);
+        break;
+      }
+
+      // Small delay between requests to be respectful to the API
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    // Final validation
+    if (totalFetched !== totalExpected && totalExpected > 0) {
+      console.warn(`⚠️  WARNING: Expected ${totalExpected} races but got ${totalFetched}`);
+    }
+
+    // Save complete response to file for debugging
+    const completeResponse = {
+      total: totalExpected,
+      fetched: totalFetched,
+      requests: requestCount,
+      results: allRaces
+    };
+    
+    require('fs').writeFileSync(`debug-response-${date}-COMPLETE.json`, JSON.stringify(completeResponse, null, 2));
+    console.log(`💾 Saved COMPLETE response to debug-response-${date}-COMPLETE.json`);
+    
+    console.log(`✅ Successfully fetched ALL results from API`);
+    console.log(`📊 FINAL RESULT: ${totalFetched} races fetched (expected: ${totalExpected})`);
+    
+    return {
+      total: totalExpected,
+      results: allRaces
     };
 
-    console.log(`🔍 Fetching results from API for ${date}...`);
-
-    https.get(apiUrl, options, (res) => {
-      let data = '';
-
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      res.on('end', () => {
-        try {
-          const jsonData = JSON.parse(data);
-          console.log(`✅ Successfully fetched results from API`);
-          resolve(jsonData);
-        } catch (error) {
-          console.error('❌ Error parsing API response:', error.message);
-          reject(error);
-        }
-      });
-
-    }).on('error', (error) => {
-      console.error('❌ Error making API request:', error.message);
-      reject(error);
-    });
-  });
+  } catch (error) {
+    console.error('❌ Error in paginated fetch:', error.message);
+    throw error;
+  }
 };
 
 // Get runner data from supabase
@@ -136,19 +230,29 @@ const getBspData = async (horseName, raceDate, region) => {
   try {
     const tableName = region === 'IRE' ? 'IRE_BSP_Historical' : 'UK_BSP_Historical';
     
-    // Convert date format for matching
-    const dateParts = raceDate.split("-"); const bspDateFormat = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+    // Convert date format for matching (YYYY-MM-DD to DD-MM-YYYY)
+    const dateParts = raceDate.split("-");
+    const bspDateFormat = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+    
+    // Clean horse name for matching (remove country codes)
+    const cleanHorseName = horseName.replace(/\s*\([A-Z]{2,3}\)$/, "").trim();
+    
+    console.log(`🔍 BSP lookup: ${tableName} for "${cleanHorseName}" on ${bspDateFormat}`);
     
     const { data, error } = await supabase
       .from(tableName)
       .select('*')
-      .ilike('selection_name', `%${horseName.replace(/\s*\([A-Z]{2,3}\)$/, "").trim()}%`)
+      .ilike('selection_name', `%${cleanHorseName}%`)
       .ilike('event_dt', `${bspDateFormat}%`)
       .single();
 
     if (error && error.code !== 'PGRST116') {
       console.warn(`⚠️  Error fetching BSP data for ${horseName} on ${raceDate}:`, error.message);
       return null;
+    }
+
+    if (data) {
+      console.log(`🎯 BSP found for ${cleanHorseName}: BSP=${data.bsp}`);
     }
 
     return data;
@@ -158,8 +262,164 @@ const getBspData = async (horseName, raceDate, region) => {
   }
 };
 
+// Calculate average opening odds from all bookmakers
+const calculateAverageOpeningOdds = (oddsData) => {
+  if (!oddsData) return null;
+  
+  const openingOdds = [
+    oddsData.bet365_opening, oddsData.william_hill_opening, oddsData.paddy_power_opening,
+    oddsData.sky_bet_opening, oddsData.ladbrokes_opening, oddsData.coral_opening,
+    oddsData.betfair_opening, oddsData.betfred_opening, oddsData.unibet_opening,
+    oddsData.bet_uk_opening, oddsData.bet_goodwin_opening, oddsData.bet_victor_opening,
+    oddsData.ten_bet_opening, oddsData.seven_bet_opening, oddsData.bet442_opening,
+    oddsData.betmgm_opening, oddsData.betway_opening, oddsData.boyle_sports_opening,
+    oddsData.copybet_opening, oddsData.dragon_bet_opening, oddsData.gentlemen_jim_opening,
+    oddsData.grosvenor_sports_opening, oddsData.hollywood_bets_opening, oddsData.matchbook_opening,
+    oddsData.midnite_opening, oddsData.pricedup_bet_opening, oddsData.quinn_bet_opening,
+    oddsData.sporting_index_opening, oddsData.spreadex_opening, oddsData.star_sports_opening,
+    oddsData.virgin_bet_opening, oddsData.talksport_bet_opening, oddsData.betfair_exchange_opening
+  ].filter(odds => odds && odds > 0);
+  
+  if (openingOdds.length === 0) return null;
+  
+  return openingOdds.reduce((sum, odds) => sum + odds, 0) / openingOdds.length;
+};
+
+// Parse average odds time series from string format
+const parseAverageOddsTimeSeries = (averageOddsString) => {
+  if (!averageOddsString || typeof averageOddsString !== 'string') return [];
+  
+  try {
+    // Parse format like "1.5@10:00,1.6@11:00,1.7@12:00"
+    return averageOddsString.split(',').map(entry => {
+      const [odds, time] = entry.split('@');
+      return {
+        odds: parseFloat(odds),
+        time: time
+      };
+    }).filter(entry => !isNaN(entry.odds));
+  } catch (error) {
+    return [];
+  }
+};
+
+// Calculate price movement metrics
+const calculatePriceMovementMetrics = (averageOpeningOdds, averageOddsString) => {
+  const timeSeries = parseAverageOddsTimeSeries(averageOddsString);
+  
+  if (!averageOpeningOdds || timeSeries.length === 0) {
+    return {
+      price_change_percentage: null,
+      price_volatility: null,
+      max_price: null,
+      min_price: null,
+      price_trend: null
+    };
+  }
+  
+  const prices = timeSeries.map(entry => entry.odds);
+  const finalPrice = prices[prices.length - 1];
+  
+  // Price change percentage
+  const priceChangePercentage = ((finalPrice - averageOpeningOdds) / averageOpeningOdds) * 100;
+  
+  // Price volatility (standard deviation)
+  const mean = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+  const variance = prices.reduce((sum, price) => sum + Math.pow(price - mean, 2), 0) / prices.length;
+  const volatility = Math.sqrt(variance);
+  
+  // Max and min prices
+  const maxPrice = Math.max(...prices);
+  const minPrice = Math.min(...prices);
+  
+  // Price trend (simplified: positive if final > opening, negative if final < opening)
+  const priceTrend = finalPrice > averageOpeningOdds ? 'drifting' : 
+                    finalPrice < averageOpeningOdds ? 'shortening' : 'stable';
+  
+  return {
+    price_change_percentage: priceChangePercentage,
+    price_volatility: volatility,
+    max_price: maxPrice,
+    min_price: minPrice,
+    price_trend: priceTrend
+  };
+};
+
+// Calculate market confidence score based on price stability
+const calculateMarketConfidenceScore = (averageOddsString) => {
+  const timeSeries = parseAverageOddsTimeSeries(averageOddsString);
+  
+  if (timeSeries.length < 2) return null;
+  
+  const prices = timeSeries.map(entry => entry.odds);
+  
+  // Calculate coefficient of variation (volatility relative to mean)
+  const mean = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+  const variance = prices.reduce((sum, price) => sum + Math.pow(price - mean, 2), 0) / prices.length;
+  const standardDeviation = Math.sqrt(variance);
+  const coefficientOfVariation = standardDeviation / mean;
+  
+  // Convert to confidence score (lower volatility = higher confidence)
+  // Scale from 0-100 where 100 is highest confidence
+  const confidenceScore = Math.max(0, Math.min(100, 100 - (coefficientOfVariation * 1000)));
+  
+  return confidenceScore;
+};
+
+// Calculate money indicators (steaming/drifting patterns)
+const calculateMoneyIndicators = (averageOpeningOdds, averageOddsString) => {
+  const timeSeries = parseAverageOddsTimeSeries(averageOddsString);
+  
+  if (!averageOpeningOdds || timeSeries.length < 3) {
+    return {
+      steaming_indicator: false,
+      drifting_indicator: false,
+      money_confidence: null,
+      late_money: false
+    };
+  }
+  
+  const prices = timeSeries.map(entry => entry.odds);
+  const finalPrice = prices[prices.length - 1];
+  const midPrice = prices[Math.floor(prices.length / 2)];
+  
+  // Steaming: significant shortening (price decrease)
+  const totalShortening = averageOpeningOdds - finalPrice;
+  const shorteningPercentage = (totalShortening / averageOpeningOdds) * 100;
+  const steamingIndicator = shorteningPercentage > 15; // More than 15% shortening
+  
+  // Drifting: significant lengthening (price increase)
+  const totalDrifting = finalPrice - averageOpeningOdds;
+  const driftingPercentage = (totalDrifting / averageOpeningOdds) * 100;
+  const driftingIndicator = driftingPercentage > 20; // More than 20% drifting
+  
+  // Money confidence based on consistent movement direction
+  let consistentMovements = 0;
+  for (let i = 1; i < prices.length; i++) {
+    const movement = prices[i] - prices[i-1];
+    const expectedDirection = steamingIndicator ? -1 : driftingIndicator ? 1 : 0;
+    if ((movement < 0 && expectedDirection < 0) || (movement > 0 && expectedDirection > 0)) {
+      consistentMovements++;
+    }
+  }
+  const moneyConfidence = consistentMovements / (prices.length - 1);
+  
+  // Late money: significant movement in final third of time series
+  const finalThirdStart = Math.floor(prices.length * 2/3);
+  const finalThirdPrices = prices.slice(finalThirdStart);
+  const lateMovement = Math.abs(finalThirdPrices[finalThirdPrices.length - 1] - finalThirdPrices[0]);
+  const lateMoney = lateMovement > (averageOpeningOdds * 0.1); // More than 10% movement in final third
+  
+  return {
+    steaming_indicator: steamingIndicator,
+    drifting_indicator: driftingIndicator,
+    money_confidence: moneyConfidence,
+    late_money: lateMoney
+  };
+};
+
 // Calculate derived fields
-const calculateDerivedFields = (runner, results) => {
+const calculateDerivedFields = (runner, results, runnerData, oddsData) => {
   const derived = {};
   
   // Win/place flags
@@ -182,12 +442,25 @@ const calculateDerivedFields = (runner, results) => {
   derived.beaten_distance_numeric = runner.btn && runner.btn !== '0' ? parseFloat(runner.btn) : 0;
   derived.overall_beaten_distance_numeric = runner.ovr_btn && runner.ovr_btn !== '0' ? parseFloat(runner.ovr_btn) : 0;
   
+  // Calculate advanced price metrics
+  const averageOpeningOdds = calculateAverageOpeningOdds(oddsData);
+  const averageOddsString = runnerData?.average_odds || '';
+  
+  const priceMetrics = calculatePriceMovementMetrics(averageOpeningOdds, averageOddsString);
+  const moneyIndicators = calculateMoneyIndicators(averageOpeningOdds, averageOddsString);
+  
+  derived.average_opening_odds = averageOpeningOdds;
+  derived.market_confidence_score = calculateMarketConfidenceScore(averageOddsString);
+  
+  // Add all calculated metrics
+  Object.assign(derived, priceMetrics, moneyIndicators);
+  
   return derived;
 };
 
 // Build master results row
 const buildMasterResultsRow = (race, runner, raceData, runnerData, oddsData, bspData) => {
-  const derivedFields = calculateDerivedFields(runner, race);
+  const derivedFields = calculateDerivedFields(runner, race, runnerData, oddsData);
   
   return {
     // Race Information
@@ -470,7 +743,7 @@ const processResults = async (results, isUpdate = false) => {
   console.log(`\n🔄 Processing ${results.results?.length || 0} races...`);
 
   for (const race of results.results || []) {
-    console.log(`\n📍 Processing race: ${race.race_name} at ${race.course} (${race.race_id})`);
+    console.log(`\n📍 Processing race: ${race.race_name} at ${race.course}`);
     
     // Get race data from supabase
     const raceData = await getRaceData(race.race_id);
@@ -483,11 +756,11 @@ const processResults = async (results, isUpdate = false) => {
         const exists = await recordExists(race.race_id, runner.horse_id);
         
         if (exists && !isUpdate) {
-          console.log(`⏭️  Record already exists for ${runner.horse}, skipping...`);
+          console.log(`⏭️  Record exists for ${runner.horse}, skipping...`);
           continue;
         }
         
-        console.log(`${exists ? '🔄' : '➕'} Processing ${runner.horse} (${runner.horse_id})...`);
+        console.log(`${exists ? '🔄' : '➕'} Processing ${runner.horse}...`);
         
         // Get all the supplementary data
         const [runnerData, oddsData, bspData] = await Promise.all([
@@ -500,15 +773,16 @@ const processResults = async (results, isUpdate = false) => {
         const resultRow = buildMasterResultsRow(race, runner, raceData, runnerData, oddsData, bspData);
         
         // Insert or update the record
-        const shouldUpdate = exists && isUpdate; const success = await insertMasterResult(resultRow, shouldUpdate);
+        const shouldUpdate = exists && isUpdate;
+        const success = await insertMasterResult(resultRow, shouldUpdate);
         
         if (success) {
           if (shouldUpdate) {
             totalUpdated++;
-            console.log(`✅ Updated record for ${runner.horse}`);
+            console.log(`✅ Updated ${runner.horse}`);
           } else {
             totalInserted++;
-            console.log(`✅ Inserted record for ${runner.horse}`);
+            console.log(`✅ Inserted ${runner.horse}`);
           }
         } else {
           totalErrors++;
@@ -524,11 +798,7 @@ const processResults = async (results, isUpdate = false) => {
     }
   }
 
-  console.log(`\n📊 Processing Summary:`);
-  console.log(`   Total processed: ${totalProcessed}`);
-  console.log(`   Successfully inserted: ${totalInserted}`);
-  console.log(`   Successfully updated: ${totalUpdated}`);
-  console.log(`   Errors: ${totalErrors}`);
+  console.log(`\n📊 Summary: Processed: ${totalProcessed}, Inserted: ${totalInserted}, Updated: ${totalUpdated}, Errors: ${totalErrors}`);
   
   return {
     totalProcessed,
@@ -541,16 +811,13 @@ const processResults = async (results, isUpdate = false) => {
 // Main execution function
 const main = async () => {
   try {
-    console.log('🚀 Starting Master Results Population Script');
+    console.log('🚀 Starting Master Results Population');
     
     const targetDate = getYesterdayDate();
     console.log(`📅 Target date: ${targetDate}`);
+    console.log(`🔄 Mode: INSERT`);
     
-    // Check if this is a second run (update run)
-    const isUpdate = true;
-    console.log(`🔄 Run mode: ${isUpdate ? 'UPDATE (always update existing records)' : 'INSERT-ONLY (skip existing records)'}`);
-    
-    // Fetch results from API
+    // Fetch results from API with FULL PAGINATION
     const results = await fetchRacingResults(targetDate);
     
     if (!results.results || results.results.length === 0) {
@@ -558,10 +825,10 @@ const main = async () => {
       return;
     }
     
-    console.log(`📋 Found ${results.results.length} races with results`);
+    console.log(`📋 Found ${results.results.length} races for ${targetDate}`);
     
     // Process all results
-    const summary = await processResults(results, isUpdate);
+    const summary = await processResults(results, false);
     
     console.log('\n🎉 Script completed successfully!');
     console.log(`📈 Final stats: ${summary.totalInserted} inserted, ${summary.totalUpdated} updated, ${summary.totalErrors} errors`);
@@ -577,4 +844,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, processResults, fetchRacingResults }; 
+module.exports = { main, processResults, fetchRacingResults };
